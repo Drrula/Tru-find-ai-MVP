@@ -21,6 +21,7 @@ import structlog
 
 from app.core.event_registry import lookup
 from app.core.ids import new_id
+from app.core.observability import report_event_breadcrumb
 
 ENVELOPE_SCHEMA_VERSION = 1
 
@@ -175,6 +176,13 @@ def publish_event(
         payload=payload or {},
     )
     get_publisher().publish(event)
+
+    # Sentry breadcrumb (no-op when Sentry isn't initialized). Per ADR-044
+    # + A.12: every published event becomes a breadcrumb so subsequent
+    # error reports include the event timeline. PII scrubbing is applied
+    # inside report_event_breadcrumb (per ADR-013).
+    report_event_breadcrumb(event_type, payload)
+
     return event
 
 

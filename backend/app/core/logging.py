@@ -14,33 +14,13 @@ from typing import Any
 
 import structlog
 
-# Fields that, if present in a log event_dict, are redacted before output.
-# Aligned with ADR-013 PII policy. Keep this set in sync as new sensitive
-# fields are introduced.
-_REDACT_FIELDS = frozenset(
-    {
-        "email",
-        "email_plaintext",
-        "phone",
-        "phone_plaintext",
-        "address",
-        "tax_id",
-        "ssn",
-        "password",
-        "api_key",
-        "secret",
-        "access_token",
-        "session_token",
-        "magic_link_token",
-        "encryption_key",
-    }
-)
+from app.core.pii import PII_FIELDS
 
 
 def _redact_pii(_logger: Any, _method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
-    """Replace values for known PII keys with '[redacted]'."""
+    """Replace values for known PII keys with '[redacted]'. Per ADR-013 / app.core.pii."""
     for key in event_dict:
-        if key.lower() in _REDACT_FIELDS:
+        if key.lower() in PII_FIELDS:
             event_dict[key] = "[redacted]"
     return event_dict
 
