@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import ResultsPage from "../ResultsPage.jsx";
+import ResultsPage from "./ResultsPage.jsx";
 import { apiFetch, ApiError } from "./lib/api.js";
 
 const STORAGE_KEY = "trufindai:lastAnalysis";
