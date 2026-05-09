@@ -104,6 +104,8 @@ If the temptation to "just add a tiny X" arises during Phase A, push it to its p
 **Outstanding decisions that must resolve before E:**
 - §5.2 pricing model.
 - §5.3 refund/expiration policy.
+- §5.14 tax provider selection (if multi-state or international customers).
+- §5.16 subscription pricing tiers, trial, dunning, proration (if launching subscriptions).
 
 **Must establish in E:**
 - Webhook handler idempotent on `stripe_event_id`.

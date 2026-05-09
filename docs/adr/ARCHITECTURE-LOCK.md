@@ -2,18 +2,18 @@
 
 | Field | Value |
 |---|---|
-| Version | v1.3 |
+| Version | v1.4 |
 | Status | **Final, pre-implementation** |
-| Locked | 2026-05-08 |
+| Locked | 2026-05-09 |
 | Region | US East (Railway) |
-| Supersedes | v1.2 (extends with ADRs 035–042: lead intelligence, communication compliance, phone intelligence, compliance policy placeholder). See `LOCK-SUMMARY.md` for the questionnaire decisions that produced these ADRs. |
+| Supersedes | v1.3 (extends with ADR-043: finance & commercial compliance placeholder, hard boundary against marketplace/payout flows). v1.2 (extends with ADRs 035–042: lead intelligence, communication compliance, phone intelligence, compliance policy placeholder). See `LOCK-SUMMARY.md` for the questionnaire decisions that produced ADRs 035–042. |
 | Change rule | See `docs/adr/README.md`. Modifying a Locked ADR or finalized schema requires a superseding ADR. Modifying a **Blocking ADR** (ADR-034) requires explicit review before implementation proceeds. |
 
 This document is the contract. Implementation conforms to it. Phase A may not begin until this is committed and acknowledged. Subsequent phases inherit every assumption stated here.
 
 ---
 
-## Part 1 — ADR index (42 entries)
+## Part 1 — ADR index (43 entries)
 
 The full text of each ADR is in `docs/adr/ADR-NNN-*.md`. Status legend:
 
@@ -65,8 +65,9 @@ The full text of each ADR is in `docs/adr/ADR-NNN-*.md`. Status legend:
 | 040 | Definition-driven event taxonomy | **Locked** | Yes |
 | 041 | Phone intelligence: line-type + ownership/reassignment | **Locked** | Yes |
 | 042 | Compliance Policy Layer (placeholder) | **Locked (placeholder)** | Yes |
+| 043 | Finance & commercial compliance (placeholder) | **Locked (placeholder)** | Yes |
 
-30 of 42 ADRs are Blocking ADRs. Any change to those, or any new ADR materially affecting the eight domains in ADR-034, requires explicit review before implementation proceeds.
+31 of 43 ADRs are Blocking ADRs. Any change to those, or any new ADR materially affecting the eight domains in ADR-034, requires explicit review before implementation proceeds.
 
 ---
 
@@ -903,6 +904,202 @@ ALTER TABLE ai_probe
 -- Concrete migration ordering follows ADR-027 (additive between deploys).
 ```
 
+### 2.6 Finance & commercial compliance (v1.4 placeholder)
+
+These tables land in Phase B's first migration as empty placeholders alongside §2.5. Decisions and rationale: ADR-043. Stripe is the locked payments primitive; tax and accounting providers behind adapters with concrete vendors deferred (§5.14, §5.15).
+
+#### 2.6.1 `entitlement` and `purchase` (v1.2 tables, with v1.4 column additions)
+
+```sql
+ALTER TABLE entitlement
+  ADD COLUMN subscription_id uuid NULL REFERENCES billing_subscription(id);
+-- Existing source_purchase_id remains; CHECK that exactly one source
+-- (purchase or subscription) is populated per row.
+
+ALTER TABLE purchase
+  ADD COLUMN tax_amount_cents     int NOT NULL DEFAULT 0,
+  ADD COLUMN tax_jurisdiction_id  uuid NULL REFERENCES tax_jurisdiction(id);
+```
+
+#### 2.6.2 Subscriptions (ADR-043)
+
+```sql
+billing_subscription (
+  id                       uuid PK,
+  account_id               uuid NOT NULL REFERENCES account(id),
+  stripe_subscription_id   text NOT NULL UNIQUE,
+  product_code             text NOT NULL,
+  status                   text NOT NULL CHECK (status IN
+                             ('trialing','active','past_due','canceled','unpaid','paused')),
+  current_period_start     timestamptz NOT NULL,
+  current_period_end       timestamptz NOT NULL,
+  cancel_at                timestamptz NULL,
+  canceled_at              timestamptz NULL,
+  source_event_id          uuid REFERENCES stripe_event(id),
+  created_at, updated_at
+)
+INDEX (account_id, status)
+```
+
+#### 2.6.3 Invoices (ADR-043)
+
+```sql
+invoice (
+  id                       uuid PK,
+  account_id               uuid NOT NULL,
+  stripe_invoice_id        text NOT NULL UNIQUE,
+  invoice_number           text NULL,
+  subscription_id          uuid NULL REFERENCES billing_subscription(id),
+  status                   text NOT NULL CHECK (status IN
+                             ('draft','open','paid','void','uncollectible')),
+  amount_subtotal_cents    int NOT NULL,
+  amount_tax_cents         int NOT NULL DEFAULT 0,
+  amount_total_cents       int NOT NULL,
+  currency                 text NOT NULL,
+  hosted_invoice_url       text NULL,
+  pdf_url                  text NULL,
+  issued_at                timestamptz NULL,
+  paid_at                  timestamptz NULL,
+  due_at                   timestamptz NULL,
+  source_event_id          uuid REFERENCES stripe_event(id),
+  created_at, updated_at
+)
+INDEX (account_id, issued_at DESC)
+
+invoice_line (
+  id                       uuid PK,
+  invoice_id               uuid NOT NULL REFERENCES invoice(id),
+  account_id               uuid NOT NULL,
+  description              text NOT NULL,
+  quantity                 int NOT NULL DEFAULT 1,
+  unit_amount_cents        int NOT NULL,
+  amount_cents             int NOT NULL,
+  product_code             text,
+  metadata                 jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at
+)
+```
+
+#### 2.6.4 Refunds and credits (ADR-043)
+
+```sql
+refund (
+  id                       uuid PK,
+  account_id               uuid NOT NULL,
+  purchase_id              uuid NULL REFERENCES purchase(id),
+  invoice_id               uuid NULL REFERENCES invoice(id),
+  stripe_refund_id         text NOT NULL UNIQUE,
+  amount_cents             int NOT NULL,
+  currency                 text NOT NULL,
+  reason                   text NULL,
+  status                   text NOT NULL CHECK (status IN
+                             ('pending','succeeded','failed','canceled')),
+  source_event_id          uuid REFERENCES stripe_event(id),
+  created_at, updated_at
+)
+INDEX (account_id, created_at DESC)
+
+credit (
+  id                       uuid PK,
+  account_id               uuid NOT NULL,
+  amount_cents             int NOT NULL,
+  currency                 text NOT NULL,
+  reason                   text NOT NULL,
+  expires_at               timestamptz NULL,
+  source_event_id          uuid NULL REFERENCES stripe_event(id),
+  created_by_user_id       uuid NULL,
+  created_at, updated_at
+)
+INDEX (account_id, expires_at)
+-- Consumption order: FIFO by expires_at NULLS LAST, then created_at ASC.
+```
+
+#### 2.6.5 Billing address and tax metadata (ADR-043)
+
+```sql
+billing_address (
+  id                       uuid PK,
+  account_id               uuid NOT NULL REFERENCES account(id),
+  line1_encrypted          bytea,
+  line2_encrypted          bytea,
+  city                     text,
+  state                    text,
+  postal_code              text,
+  country                  text NOT NULL,
+  tax_id_encrypted         bytea,
+  is_primary               boolean NOT NULL DEFAULT true,
+  effective_from           timestamptz NOT NULL,
+  effective_to             timestamptz NULL,
+  source_event_id          uuid REFERENCES stripe_event(id),
+  status                   text NOT NULL DEFAULT 'active'
+                           CHECK (status IN ('active','superseded','retired')),
+  created_at, updated_at, deleted_at
+)
+INDEX (account_id, is_primary) WHERE deleted_at IS NULL AND is_primary = true
+
+tax_jurisdiction (
+  id                       uuid PK,
+  account_id               uuid NOT NULL,
+  billing_address_id       uuid NOT NULL REFERENCES billing_address(id),
+  country                  text NOT NULL,
+  state                    text NULL,
+  locality                 text NULL,
+  jurisdiction_code        text,
+  tax_provider             text NULL,
+  classified_at            timestamptz NOT NULL,
+  raw_classification       jsonb NULL,
+  created_at, updated_at
+)
+INDEX (account_id, classified_at DESC)
+
+tax_exemption (
+  id                       uuid PK,
+  account_id               uuid NOT NULL,
+  exemption_type           text NOT NULL CHECK (exemption_type IN
+                             ('reseller','nonprofit','government','custom')),
+  jurisdiction             text NOT NULL,
+  certificate_ref          text,                   -- external object-storage URL (per §5.9)
+  effective_from           timestamptz NOT NULL,
+  effective_to             timestamptz NULL,
+  status                   text NOT NULL CHECK (status IN
+                             ('active','expired','revoked','pending')),
+  source                   text NOT NULL CHECK (source IN
+                             ('admin','customer_provided','provider_returned')),
+  notes                    text,
+  created_at, updated_at
+)
+INDEX (account_id, jurisdiction, status) WHERE status = 'active'
+```
+
+#### 2.6.6 Billing audit log (ADR-043)
+
+```sql
+billing_event (
+  id                       uuid PK,
+  account_id               uuid NOT NULL,
+  event_type               text NOT NULL,
+  -- Seed types: subscription_created, subscription_canceled, subscription_renewed,
+  --             invoice_issued, invoice_paid, invoice_voided,
+  --             refund_issued, credit_granted, credit_consumed,
+  --             address_updated, exemption_recorded, exemption_revoked,
+  --             tax_calculated.
+  -- Definition-driven (analogous to ADR-040 pattern); new types via migration.
+  target_kind              text NOT NULL CHECK (target_kind IN
+                             ('subscription','invoice','purchase','refund',
+                              'credit','address','exemption','tax_jurisdiction')),
+  target_id                uuid NOT NULL,
+  payload_hash             bytea,
+  source_event_id          uuid NULL REFERENCES stripe_event(id),
+  actor_kind               text NOT NULL CHECK (actor_kind IN
+                             ('user','system','webhook','admin')),
+  actor_user_id            uuid NULL,
+  occurred_at              timestamptz NOT NULL,
+  created_at
+)
+INDEX (account_id, occurred_at DESC)
+INDEX (target_kind, target_id)
+```
+
 ---
 
 ## Part 3 — Workflow lifecycles
@@ -1213,6 +1410,9 @@ Listed for completeness; gates as previously specified. Full text in §3 of the 
 | 5.11 | Phone lookup + reassignment provider concrete contract | Phase F |
 | 5.12 | Compliance policy authoring path + initial ruleset (attorney input required) | Phase F |
 | 5.13 | GDPR-erase / anonymization semantics (attorney input required) | Phase G or earlier on demand |
+| 5.14 | Tax provider selection (Stripe Tax / Avalara / TaxJar) | Phase E or first international/multi-state customer |
+| 5.15 | Accounting integration (QuickBooks / Xero / NetSuite / none) | Deferred; activate when bookkeeping volume warrants |
+| 5.16 | Subscription pricing tiers, trial, dunning, proration | Phase E (gates first subscription product) |
 
 ---
 
