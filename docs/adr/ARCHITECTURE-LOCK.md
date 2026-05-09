@@ -2,18 +2,18 @@
 
 | Field | Value |
 |---|---|
-| Version | v1.2 |
+| Version | v1.3 |
 | Status | **Final, pre-implementation** |
 | Locked | 2026-05-08 |
 | Region | US East (Railway) |
-| Supersedes | v1.1 (extends with ADR-034 governance category) |
+| Supersedes | v1.2 (extends with ADRs 035–042: lead intelligence, communication compliance, phone intelligence, compliance policy placeholder). See `LOCK-SUMMARY.md` for the questionnaire decisions that produced these ADRs. |
 | Change rule | See `docs/adr/README.md`. Modifying a Locked ADR or finalized schema requires a superseding ADR. Modifying a **Blocking ADR** (ADR-034) requires explicit review before implementation proceeds. |
 
 This document is the contract. Implementation conforms to it. Phase A may not begin until this is committed and acknowledged. Subsequent phases inherit every assumption stated here.
 
 ---
 
-## Part 1 — ADR index (34 entries)
+## Part 1 — ADR index (42 entries)
 
 The full text of each ADR is in `docs/adr/ADR-NNN-*.md`. Status legend:
 
@@ -57,8 +57,16 @@ The full text of each ADR is in `docs/adr/ADR-NNN-*.md`. Status legend:
 | 032 | Idempotency keys are explicit and stored | Locked-default | Yes |
 | 033 | UUIDv7 for all primary keys | Locked-default | Yes |
 | 034 | Blocking-ADR governance category | **Locked** | No (defines the rule) |
+| 035 | Lead intelligence as a first-class subsystem | **Locked** | Yes |
+| 036 | Lead signals, dimensions, and explainability | **Locked** | Yes |
+| 037 | Lead lifecycle states and event-driven evolution | **Locked** | Yes |
+| 038 | Warm-outbound positive-trigger requirement | **Locked** | Yes |
+| 039 | Blocklist as account-scoped suppression | **Locked** | Yes |
+| 040 | Definition-driven event taxonomy | **Locked** | Yes |
+| 041 | Phone intelligence: line-type + ownership/reassignment | **Locked** | Yes |
+| 042 | Compliance Policy Layer (placeholder) | **Locked (placeholder)** | Yes |
 
-22 of 34 ADRs are Blocking ADRs. Any change to those, or any new ADR materially affecting the eight domains in ADR-034, requires explicit review before implementation proceeds.
+30 of 42 ADRs are Blocking ADRs. Any change to those, or any new ADR materially affecting the eight domains in ADR-034, requires explicit review before implementation proceeds.
 
 ---
 
@@ -574,6 +582,327 @@ INDEX (job_name, finished_at DESC)
 - All `*_at` defaults `now()` for `created_at`/`updated_at`; trigger updates `updated_at`.
 - Numeric scores constrained `BETWEEN 0 AND 1` or `BETWEEN 0 AND 100` per scale.
 
+### 2.5 Lead intelligence + communication compliance + phone intelligence (v1.3)
+
+These tables land in Phase B's first migration alongside the v1.2 schema. Decisions and rationale: see ADRs 035–042 and `LOCK-SUMMARY.md`.
+
+#### 2.5.1 `lead` (v1.2 row, with v1.3 column additions)
+
+```sql
+ALTER TABLE lead
+  ADD COLUMN lifecycle_state    text NOT NULL DEFAULT 'cold'
+             CHECK (lifecycle_state IN
+               ('cold','warm','engaged','qualified','opportunity',
+                'customer','dormant','unsubscribed')),
+  ADD COLUMN vertical_id        uuid NULL REFERENCES vertical(id),
+  ADD COLUMN first_seen_at      timestamptz NOT NULL DEFAULT now(),
+  ADD COLUMN last_engaged_at    timestamptz NULL,
+  ADD COLUMN contact_phone_record_id uuid NULL REFERENCES phone_record(id);
+```
+
+#### 2.5.2 Lead signals & dimensions (ADR-036)
+
+```sql
+lead_signal_definition (
+  name              text PK,
+  description       text NOT NULL,
+  contributes_to    text[] NOT NULL,
+  freshness_ttl_seconds int NOT NULL,
+  source_kind       text NOT NULL,
+  default_weight    numeric(4,3) NOT NULL CHECK (default_weight BETWEEN 0 AND 1),
+  default_enabled   boolean NOT NULL DEFAULT true,
+  created_at, updated_at
+)
+
+vertical_lead_signal_weight (
+  id                uuid PK,
+  vertical_id       uuid NOT NULL REFERENCES vertical(id),
+  signal_name       text NOT NULL REFERENCES lead_signal_definition(name),
+  dimension         text NOT NULL,
+  weight            numeric(4,3) NOT NULL CHECK (weight BETWEEN 0 AND 1),
+  enabled           boolean NOT NULL DEFAULT true,
+  effective_from    timestamptz NOT NULL,
+  effective_to      timestamptz NULL,
+  created_at
+)
+UNIQUE (vertical_id, signal_name, dimension, effective_from)
+
+lead_signal (
+  id                uuid PK,
+  account_id        uuid NOT NULL,
+  lead_id           uuid NOT NULL REFERENCES lead(id),
+  signal_name       text NOT NULL REFERENCES lead_signal_definition(name),
+  value             jsonb NOT NULL,
+  source            text NOT NULL,
+  source_ref_id     uuid NULL,
+  observed_at       timestamptz NOT NULL,
+  recorded_at       timestamptz NOT NULL,
+  created_at
+)
+INDEX (lead_id, signal_name, observed_at DESC)
+INDEX (account_id, observed_at DESC)
+
+lead_dimension (
+  id                uuid PK,
+  account_id        uuid NOT NULL,
+  lead_id           uuid NOT NULL REFERENCES lead(id),
+  dimension         text NOT NULL CHECK (dimension IN
+                      ('lead_quality','engagement','ai_confidence',
+                       'qualification','conversion_probability',
+                       'communication_readiness','buying_window_intensity')),
+  value_numeric     numeric(5,2) NULL,
+  value_text        text NULL,
+  computed_at       timestamptz NOT NULL,
+  vertical_id       uuid NULL,
+  weight_version_at timestamptz NOT NULL,
+  inputs            jsonb NOT NULL,
+  confidence        numeric(4,3) NULL CHECK (confidence BETWEEN 0 AND 1
+                                              OR confidence IS NULL),
+  created_at,
+  CHECK ((value_numeric IS NULL) <> (value_text IS NULL))
+)
+INDEX (lead_id, dimension, computed_at DESC)
+INDEX (account_id, computed_at DESC)
+```
+
+#### 2.5.3 Event taxonomy (ADR-040)
+
+```sql
+lead_event_category (
+  name              text PK,
+  description       text NOT NULL,
+  contributes_to    text[] NOT NULL,
+  status            text NOT NULL DEFAULT 'active' CHECK (status IN ('active','retired'))
+)
+
+lead_event_source (
+  name              text PK,
+  description       text NOT NULL,
+  is_first_party    boolean NOT NULL,
+  status            text NOT NULL DEFAULT 'active' CHECK (status IN ('active','retired'))
+)
+
+lead_event_definition (
+  id                uuid PK,
+  event_type        text NOT NULL,
+  version           int NOT NULL,
+  status            text NOT NULL CHECK (status IN ('draft','active','retired')),
+  category          text NOT NULL REFERENCES lead_event_category(name),
+  source            text NOT NULL REFERENCES lead_event_source(name),
+  default_weight    numeric(4,3) NOT NULL CHECK (default_weight BETWEEN 0 AND 1),
+  freshness_ttl_seconds int NOT NULL,
+  description       text,
+  payload_schema    jsonb NOT NULL,
+  lenient           boolean NOT NULL DEFAULT false,
+  created_at, updated_at
+)
+UNIQUE (event_type, version)
+INDEX (event_type) WHERE status = 'active'
+
+vertical_lead_event_weight (
+  id                uuid PK,
+  vertical_id       uuid NOT NULL REFERENCES vertical(id),
+  event_type        text NOT NULL,
+  weight            numeric(4,3) NOT NULL,
+  enabled           boolean NOT NULL DEFAULT true,
+  effective_from    timestamptz NOT NULL,
+  effective_to      timestamptz NULL,
+  created_at
+)
+UNIQUE (vertical_id, event_type, effective_from)
+
+lead_event (
+  id                  uuid PK,
+  account_id          uuid NOT NULL,
+  lead_id             uuid NOT NULL REFERENCES lead(id),
+  event_type          text NOT NULL,
+  event_definition_id uuid NOT NULL REFERENCES lead_event_definition(id),
+  payload             jsonb NOT NULL,
+  actor_kind          text NOT NULL CHECK (actor_kind IN ('user','system','webhook','job','ai')),
+  actor_user_id       uuid NULL,
+  occurred_at         timestamptz NOT NULL,
+  recorded_at         timestamptz NOT NULL,
+  created_at
+)
+INDEX (lead_id, occurred_at DESC)
+INDEX (account_id, event_type, occurred_at DESC)
+```
+
+#### 2.5.4 Lead enrichment + attribution (ADR-035, ADR-036)
+
+```sql
+lead_enrichment (
+  id                uuid PK,
+  account_id        uuid NOT NULL,
+  lead_id           uuid NOT NULL REFERENCES lead(id),
+  provider          text NOT NULL,
+  payload           jsonb NOT NULL,
+  fetched_at        timestamptz NOT NULL,
+  ttl_at            timestamptz NULL,
+  created_at
+)
+INDEX (lead_id, provider, fetched_at DESC)
+
+lead_source_attribution (
+  id                uuid PK,
+  account_id        uuid NOT NULL,
+  lead_id           uuid NOT NULL REFERENCES lead(id),
+  source            text NOT NULL,
+  campaign          text NULL,
+  medium            text NULL,
+  ref_url           text NULL,
+  utm_source        text NULL,
+  utm_medium        text NULL,
+  utm_campaign      text NULL,
+  utm_term          text NULL,
+  utm_content       text NULL,
+  touched_at        timestamptz NOT NULL,
+  is_first_touch    boolean NOT NULL,
+  is_last_touch     boolean NOT NULL,
+  created_at
+)
+INDEX (lead_id, touched_at)
+```
+
+#### 2.5.5 Blocklist (ADR-039)
+
+```sql
+blocklist (
+  id                uuid PK,
+  account_id        uuid NOT NULL REFERENCES account(id),
+  channel           text NOT NULL CHECK (channel IN ('sms','email','any')),
+  target_kind       text NOT NULL CHECK (target_kind IN ('contact_identifier','business','lead')),
+  identifier_hash   bytea NOT NULL,
+  reason            text NOT NULL,
+  source            text NOT NULL,
+  expires_at        timestamptz NULL,
+  recorded_at       timestamptz NOT NULL,
+  created_at, updated_at, deleted_at
+)
+UNIQUE (account_id, channel, target_kind, identifier_hash) WHERE deleted_at IS NULL
+INDEX (account_id, channel) WHERE deleted_at IS NULL
+```
+
+#### 2.5.6 Phone intelligence (ADR-041)
+
+```sql
+phone_record (
+  id                       uuid PK,
+  e164_hash                bytea NOT NULL UNIQUE,
+  e164_encrypted           bytea NOT NULL,
+  country_code             text NOT NULL,
+  -- Line-type
+  phone_line_type          text NULL CHECK (phone_line_type IN
+                             ('mobile','landline','voip','toll_free','unknown')
+                             OR phone_line_type IS NULL),
+  carrier_name             text NULL,
+  lookup_provider          text NULL,
+  lookup_confidence        numeric(4,3) NULL CHECK (lookup_confidence BETWEEN 0 AND 1
+                                                     OR lookup_confidence IS NULL),
+  lookup_checked_at        timestamptz NULL,
+  lookup_attempt_count     int NOT NULL DEFAULT 0,
+  sms_eligible             boolean NULL,
+  voice_eligible           boolean NULL,
+  last_lookup_result       jsonb NULL,
+  lookup_cost_cents        int NOT NULL DEFAULT 0,
+  -- Ownership / reassignment
+  owner_confidence         numeric(4,3) NULL CHECK (owner_confidence BETWEEN 0 AND 1
+                                                    OR owner_confidence IS NULL),
+  owner_last_verified_at   timestamptz NULL,
+  reassignment_risk        text NOT NULL DEFAULT 'unknown'
+                           CHECK (reassignment_risk IN
+                             ('low','medium','high','confirmed_reassigned','unknown')),
+  first_seen_at            timestamptz NOT NULL,
+  last_seen_at             timestamptz NOT NULL,
+  created_at, updated_at
+)
+INDEX (lookup_checked_at) WHERE lookup_checked_at IS NULL
+INDEX (reassignment_risk) WHERE reassignment_risk IN ('high','confirmed_reassigned')
+INDEX (last_seen_at)
+
+phone_observation (
+  id                uuid PK,
+  account_id        uuid NOT NULL,
+  phone_record_id   uuid NOT NULL REFERENCES phone_record(id),
+  lead_id           uuid NULL REFERENCES lead(id),
+  business_id       uuid NULL REFERENCES business(id),
+  source            text NOT NULL,
+  raw_input_redacted text,
+  first_seen_at     timestamptz NOT NULL,
+  created_at
+)
+INDEX (account_id, phone_record_id)
+INDEX (lead_id) WHERE lead_id IS NOT NULL
+INDEX (business_id) WHERE business_id IS NOT NULL
+
+phone_reassignment_check (
+  id                    uuid PK,
+  phone_record_id       uuid NOT NULL REFERENCES phone_record(id),
+  provider              text NOT NULL,
+  checked_at            timestamptz NOT NULL,
+  result                text NOT NULL CHECK (result IN
+                          ('current','reassigned','disconnected','unknown','error')),
+  reassigned_on         date NULL,
+  raw_response          jsonb NOT NULL,
+  cost_cents            int NOT NULL DEFAULT 0,
+  created_at
+)
+INDEX (phone_record_id, checked_at DESC)
+```
+
+#### 2.5.7 Compliance policy (ADR-042 placeholder)
+
+```sql
+compliance_policy (
+  id              uuid PK,
+  scope_kind      text NOT NULL CHECK (scope_kind IN
+                    ('federal','state','channel','vertical','account','category','combination')),
+  scope_value     jsonb NOT NULL,
+  rule_kind       text NOT NULL,
+  rule_value      jsonb NOT NULL,
+  version         int NOT NULL,
+  effective_from  timestamptz NOT NULL,
+  effective_to    timestamptz NULL,
+  status          text NOT NULL CHECK (status IN ('draft','active','retired')),
+  source          text NOT NULL CHECK (source IN
+                    ('attorney_provided','system_default','manual_override')),
+  source_metadata jsonb,
+  created_at, updated_at
+)
+UNIQUE (scope_kind, scope_value, rule_kind, version)
+INDEX (rule_kind, status) WHERE status = 'active'
+
+compliance_policy_evaluation (
+  id                  uuid PK,
+  account_id          uuid NOT NULL,
+  lead_id             uuid NULL,
+  channel             text NOT NULL,
+  message_category    text NULL,
+  send_request_id     uuid NOT NULL,
+  policies_evaluated  jsonb NOT NULL,
+  rules_passed        jsonb NOT NULL,
+  rules_failed        jsonb NOT NULL,
+  decision            text NOT NULL CHECK (decision IN ('allow','deny','soft_warn')),
+  reason              text NULL,
+  evaluated_at        timestamptz NOT NULL
+)
+INDEX (account_id, evaluated_at DESC)
+INDEX (lead_id, evaluated_at DESC) WHERE lead_id IS NOT NULL
+INDEX (decision) WHERE decision = 'deny'
+```
+
+#### 2.5.8 `ai_probe` (v1.2 table, with v1.3 column additions)
+
+```sql
+ALTER TABLE ai_probe
+  ADD COLUMN target_type text NOT NULL DEFAULT 'analysis_run'
+             CHECK (target_type IN ('analysis_run','lead')),
+  ADD COLUMN lead_id     uuid NULL REFERENCES lead(id);
+-- analysis_run_id remains NOT NULL in v1.2; in v1.3 it becomes NULLABLE with a
+-- CHECK constraint that exactly one of (analysis_run_id, lead_id) is non-null.
+-- Concrete migration ordering follows ADR-027 (additive between deploys).
+```
+
 ---
 
 ## Part 3 — Workflow lifecycles
@@ -881,6 +1210,9 @@ Listed for completeness; gates as previously specified. Full text in §3 of the 
 | 5.8 | Twilio auto-reply policy | Phase F |
 | 5.9 | Object storage choice | Phase G |
 | 5.10 | Secrets manager | Anytime |
+| 5.11 | Phone lookup + reassignment provider concrete contract | Phase F |
+| 5.12 | Compliance policy authoring path + initial ruleset (attorney input required) | Phase F |
+| 5.13 | GDPR-erase / anonymization semantics (attorney input required) | Phase G or earlier on demand |
 
 ---
 

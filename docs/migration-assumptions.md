@@ -122,6 +122,8 @@ If the temptation to "just add a tiny X" arises during Phase A, push it to its p
 
 **Outstanding decisions that must resolve before F:**
 - §5.8 auto-reply policy.
+- §5.11 phone lookup + reassignment provider concrete contract.
+- §5.12 compliance policy authoring path + initial ruleset (attorney input required).
 
 **Must establish in F:**
 - Single Twilio adapter (ADR-024).
@@ -137,6 +139,7 @@ If the temptation to "just add a tiny X" arises during Phase A, push it to its p
 
 **Outstanding decisions that must resolve before G:**
 - §5.9 object storage choice.
+- §5.13 GDPR-erase / anonymization semantics (attorney input required; can elevate to earlier phase if customer-facing erasure request arrives).
 
 **Must establish in G:**
 - Authenticated `POST /v1/imports`.
