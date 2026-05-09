@@ -121,3 +121,29 @@ def test_analyze_business_unchanged() -> None:
         "trade",
     ]
     assert len(body["competitors"]) == 3
+
+
+def test_create_app_emits_system_started_event() -> None:
+    """B.0.3 production emit site: create_app() publishes system.app.started
+    via the active publisher. End-to-end proof that the event abstraction is
+    wired into application startup (per ADR-044)."""
+    from app.core.events import (
+        RecordingEventPublisher,
+        reset_publisher,
+        set_publisher,
+    )
+    from app.main import create_app
+
+    rec = RecordingEventPublisher()
+    set_publisher(rec)
+    try:
+        create_app()
+        emitted_types = [e.event_type for e in rec.events]
+        assert "system.app.started" in emitted_types
+
+        started = next(e for e in rec.events if e.event_type == "system.app.started")
+        assert started.actor_kind == "system"
+        assert "env" in started.payload
+        assert "version" in started.payload
+    finally:
+        reset_publisher()

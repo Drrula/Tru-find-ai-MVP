@@ -143,8 +143,11 @@ def publish_event(
     event_type strings inline at emit sites. This helper enforces that contract by
     raising UnknownEventTypeError for unregistered types.
 
-    `correlation_id` is an explicit parameter in B.0.2; auto-fill from middleware
-    contextvars lands in B.0.3 (correlation propagation).
+    `correlation_id` falls back to the structlog contextvars `request_id` when
+    not explicitly supplied. RequestIDMiddleware (ADR-030) binds `request_id`
+    per request, so events emitted from request handlers automatically inherit
+    the request's correlation. Worker jobs (Phase C) bind `request_id` to a
+    job_id at job start to maintain the same propagation contract.
     """
     definition = lookup(event_type)
 
@@ -155,6 +158,9 @@ def publish_event(
             f"actor_kind {actor_kind!r} not allowed for event_type {event_type!r}; "
             f"allowed: {sorted(definition.actor_kinds_allowed)}"
         )
+
+    if correlation_id is None:
+        correlation_id = _correlation_id_from_context()
 
     event = Event(
         event_id=new_id(),
@@ -170,3 +176,21 @@ def publish_event(
     )
     get_publisher().publish(event)
     return event
+
+
+def _correlation_id_from_context() -> UUID | None:
+    """Read `request_id` from structlog contextvars and return as UUID.
+
+    Returns None if no `request_id` is bound or if the bound value isn't a
+    valid UUID (e.g. an external trace-ID format we don't recognize). The
+    helper degrades silently rather than raising — losing correlation on a
+    publish is preferable to dropping the event entirely.
+    """
+    ctx = structlog.contextvars.get_contextvars()
+    rid = ctx.get("request_id")
+    if not rid:
+        return None
+    try:
+        return UUID(str(rid))
+    except (ValueError, AttributeError, TypeError):
+        return None

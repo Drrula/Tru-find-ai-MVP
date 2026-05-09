@@ -10,6 +10,7 @@ from fastapi import FastAPI
 
 from app.core.config import get_settings
 from app.core.errors import register_error_handlers
+from app.core.events import publish_event
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import register_middleware
 from app.core.observability import init_sentry
@@ -28,6 +29,13 @@ def create_app() -> FastAPI:
 
     log = get_logger("app.main")
     log.info("app_initialized", env=settings.app_env)
+
+    # First production emit: proves end-to-end flow per ADR-044 (B.0.3).
+    publish_event(
+        "system.app.started",
+        payload={"env": settings.app_env, "version": app.version},
+        actor_kind="system",
+    )
 
     @app.get("/health")
     def health() -> dict[str, str]:

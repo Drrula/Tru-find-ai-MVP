@@ -116,8 +116,7 @@ def test_publish_event_unknown_actor_kind_raises() -> None:
 
 
 def test_publish_event_explicit_correlation_id_passes_through() -> None:
-    """correlation_id parameter is set on the envelope verbatim. (Auto-fill from
-    contextvars is B.0.3 territory; B.0.2 only exposes the parameter.)"""
+    """Explicit correlation_id parameter is set on the envelope verbatim."""
     from app.core.events import (
         RecordingEventPublisher,
         publish_event,
@@ -132,6 +131,97 @@ def test_publish_event_explicit_correlation_id_passes_through() -> None:
         rid = new_id()
         ev = publish_event("system.app.started", payload={}, correlation_id=rid)
         assert ev.correlation_id == rid
+    finally:
+        reset_publisher()
+
+
+def test_publish_event_autofills_correlation_from_contextvars() -> None:
+    """B.0.3: correlation_id falls back to the structlog `request_id` contextvar.
+
+    Mirrors what RequestIDMiddleware sets per request, so events emitted from
+    request handlers inherit the request's correlation automatically.
+    """
+    import structlog
+
+    from app.core.events import (
+        RecordingEventPublisher,
+        publish_event,
+        reset_publisher,
+        set_publisher,
+    )
+    from app.core.ids import new_id
+
+    rec = RecordingEventPublisher()
+    set_publisher(rec)
+    try:
+        rid = new_id()
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(request_id=str(rid))
+        try:
+            ev = publish_event("system.app.started", payload={})
+            assert ev.correlation_id == rid
+        finally:
+            structlog.contextvars.clear_contextvars()
+    finally:
+        reset_publisher()
+
+
+def test_publish_event_explicit_correlation_overrides_contextvar() -> None:
+    """If both an explicit correlation_id and a contextvar request_id exist,
+    the explicit parameter wins (caller intent is authoritative)."""
+    import structlog
+
+    from app.core.events import (
+        RecordingEventPublisher,
+        publish_event,
+        reset_publisher,
+        set_publisher,
+    )
+    from app.core.ids import new_id
+
+    rec = RecordingEventPublisher()
+    set_publisher(rec)
+    try:
+        ctx_rid = new_id()
+        explicit_rid = new_id()
+        assert ctx_rid != explicit_rid
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(request_id=str(ctx_rid))
+        try:
+            ev = publish_event(
+                "system.app.started",
+                payload={},
+                correlation_id=explicit_rid,
+            )
+            assert ev.correlation_id == explicit_rid
+        finally:
+            structlog.contextvars.clear_contextvars()
+    finally:
+        reset_publisher()
+
+
+def test_publish_event_handles_non_uuid_request_id() -> None:
+    """If middleware honored a non-UUID inbound X-Request-ID, degrade gracefully:
+    correlation_id ends up None rather than crashing the publish."""
+    import structlog
+
+    from app.core.events import (
+        RecordingEventPublisher,
+        publish_event,
+        reset_publisher,
+        set_publisher,
+    )
+
+    rec = RecordingEventPublisher()
+    set_publisher(rec)
+    try:
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(request_id="not-a-uuid")
+        try:
+            ev = publish_event("system.app.started", payload={})
+            assert ev.correlation_id is None
+        finally:
+            structlog.contextvars.clear_contextvars()
     finally:
         reset_publisher()
 
