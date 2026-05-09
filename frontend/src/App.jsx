@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import ResultsPage from "../ResultsPage.jsx";
+import { apiFetch, ApiError } from "./lib/api.js";
 
 const STORAGE_KEY = "trufindai:lastAnalysis";
 
@@ -31,20 +32,28 @@ export default function App() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/analyze-business", {
+      // /analyze-business is the back-compat alias preserved through Phase B
+      // per ADR-005. When async-with-poll /v1/analyses ships in Phase C,
+      // this single call site migrates and the rest of the app is unaffected.
+      const json = await apiFetch("/analyze-business", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           business_name: businessName.trim(),
           location: location.trim(),
           website_url: websiteUrl.trim() || null,
         }),
       });
-      if (!res.ok) throw new Error(`Request failed (${res.status})`);
-      const json = await res.json();
       setData(json);
     } catch (err) {
-      setError(err.message || "Failed to load results.");
+      if (err instanceof ApiError) {
+        setError(
+          err.requestId
+            ? `${err.message} (request: ${err.requestId})`
+            : err.message,
+        );
+      } else {
+        setError(err?.message ?? "Failed to load results.");
+      }
     } finally {
       setLoading(false);
     }
