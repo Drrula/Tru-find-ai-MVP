@@ -3,7 +3,7 @@
 from hashlib import md5
 
 from app.schemas import AnalyzeResponse, CategoryScores, Competitor
-from app.signals import SIGNALS, SignalResult
+from app.domain.signals import SIGNALS, SignalResult
 
 # Map internal signal names to the four presentation categories the
 # Results Page renders. This is a presentation mapping, not a scoring change —

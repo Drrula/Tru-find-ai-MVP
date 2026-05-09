@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 
 from app.schemas import AnalyzeRequest, AnalyzeResponse
-from app.scoring import analyze
+from app.domain.scoring import analyze
 
 app = FastAPI(title="AI Visibility Scoring MVP", version="0.1.0")
 
