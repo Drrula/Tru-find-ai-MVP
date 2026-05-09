@@ -52,6 +52,7 @@ If the temptation to "just add a tiny X" arises during Phase A, push it to its p
 - Repository base class enforcing tenancy + soft-delete (ADR-031).
 - PII columns follow `(hash, encrypted)` pattern (ADR-013) — even if first user has no real PII.
 - Idempotency-key columns on every command-style table (ADR-032).
+- `DatabaseEventPublisher` (ADR-044): resolves `event_type` via registry to the correct projection table (`lead_event` / `audit_log` / `billing_event` / `compliance_policy_evaluation`) and routes through the relevant repository. Promotes the in-process registry to DB-driven (`lead_event_definition` per ADR-040).
 
 **Risk if assumptions break:**
 - Missing config slot → adding it later means a separate config refactor commit.

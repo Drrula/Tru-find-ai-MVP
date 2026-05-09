@@ -2,18 +2,18 @@
 
 | Field | Value |
 |---|---|
-| Version | v1.4 |
-| Status | **Final, pre-implementation** |
+| Version | v1.5 |
+| Status | **Final, pre-implementation** (B.0.0 doc gate; B.0.1 code begins on next direction) |
 | Locked | 2026-05-09 |
 | Region | US East (Railway) |
-| Supersedes | v1.3 (extends with ADR-043: finance & commercial compliance placeholder, hard boundary against marketplace/payout flows). v1.2 (extends with ADRs 035–042: lead intelligence, communication compliance, phone intelligence, compliance policy placeholder). See `LOCK-SUMMARY.md` for the questionnaire decisions that produced ADRs 035–042. |
+| Supersedes | v1.4 (extends with ADR-044: canonical event envelope and publisher abstraction). v1.3 (ADR-043: finance & commercial compliance placeholder). v1.2 (ADRs 035–042: lead intelligence, communication compliance, phone intelligence, compliance policy). See `LOCK-SUMMARY.md` for the questionnaire decisions that produced ADRs 035–042. |
 | Change rule | See `docs/adr/README.md`. Modifying a Locked ADR or finalized schema requires a superseding ADR. Modifying a **Blocking ADR** (ADR-034) requires explicit review before implementation proceeds. |
 
 This document is the contract. Implementation conforms to it. Phase A may not begin until this is committed and acknowledged. Subsequent phases inherit every assumption stated here.
 
 ---
 
-## Part 1 — ADR index (43 entries)
+## Part 1 — ADR index (44 entries)
 
 The full text of each ADR is in `docs/adr/ADR-NNN-*.md`. Status legend:
 
@@ -66,8 +66,9 @@ The full text of each ADR is in `docs/adr/ADR-NNN-*.md`. Status legend:
 | 041 | Phone intelligence: line-type + ownership/reassignment | **Locked** | Yes |
 | 042 | Compliance Policy Layer (placeholder) | **Locked (placeholder)** | Yes |
 | 043 | Finance & commercial compliance (placeholder) | **Locked (placeholder)** | Yes |
+| 044 | Canonical event envelope and publisher abstraction | **Locked (placeholder)** | Yes |
 
-31 of 43 ADRs are Blocking ADRs. Any change to those, or any new ADR materially affecting the eight domains in ADR-034, requires explicit review before implementation proceeds.
+32 of 44 ADRs are Blocking ADRs. Any change to those, or any new ADR materially affecting the eight domains in ADR-034, requires explicit review before implementation proceeds.
 
 ---
 
