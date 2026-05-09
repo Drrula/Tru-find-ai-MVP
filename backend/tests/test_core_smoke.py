@@ -72,7 +72,7 @@ def test_app_boots_with_middleware(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.main import app
 
     client = TestClient(app)
-    r = client.get("/health")
+    r = client.get("/v1/health")
     assert r.status_code == 200
     assert r.json() == {"status": "ok"}
     # Request ID middleware adds X-Request-ID to every response.
@@ -91,7 +91,7 @@ def test_inbound_request_id_honored() -> None:
 
     client = TestClient(app)
     inbound = "11111111-1111-7111-8111-111111111111"
-    r = client.get("/health", headers={"X-Request-ID": inbound})
+    r = client.get("/v1/health", headers={"X-Request-ID": inbound})
     assert r.headers["X-Request-ID"] == inbound
 
 
