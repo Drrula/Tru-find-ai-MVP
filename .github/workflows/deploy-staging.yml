@@ -1,0 +1,47 @@
+name: Deploy to Staging
+
+# Per ADR-026 (branch-driven staging): deploys after CI succeeds on main.
+# Production deploys live in deploy-production.yml and trigger only on
+# v* tag push.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-backend:
+    name: Deploy api to staging
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy backend
+        working-directory: backend
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_STAGING }}
+        run: railway up --service api --environment staging --detach
+
+  deploy-frontend:
+    name: Deploy web to staging
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy frontend
+        working-directory: frontend
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_STAGING }}
+        run: railway up --service web --environment staging --detach

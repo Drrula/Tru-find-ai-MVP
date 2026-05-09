@@ -1,0 +1,43 @@
+name: Deploy to Production
+
+# Per ADR-026 (tag-driven prod): deploys only on v* tag push.
+# Tags are the explicit promotion gate; merging to main alone never
+# triggers a production deploy.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-backend:
+    name: Deploy api to production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy backend
+        working-directory: backend
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_PRODUCTION }}
+        run: railway up --service api --environment production --detach
+
+  deploy-frontend:
+    name: Deploy web to production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy frontend
+        working-directory: frontend
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_PRODUCTION }}
+        run: railway up --service web --environment production --detach
