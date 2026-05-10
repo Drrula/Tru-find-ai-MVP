@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     # --- HTTP layer
     allowed_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
     rate_limit_per_minute: int = Field(default=60)
+    # B.2.4 — origin used to build magic-link URLs. Distinct from
+    # allowed_origins (CORS allowlist) to keep concerns separate.
+    frontend_origin: str = Field(default="http://localhost:5173")
 
     # --- Postgres (ADR-002, B.1.1). DATABASE_URL is required when APP_ENV is
     # staging / production; in development it defaults to the docker-compose URL.

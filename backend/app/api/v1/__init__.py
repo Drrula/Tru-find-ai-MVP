@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import analyses_legacy, health
+from app.api.v1 import analyses_legacy, auth, health
 
 api_router = APIRouter(prefix="/v1")
 api_router.include_router(health.router)
 api_router.include_router(analyses_legacy.router)
+api_router.include_router(auth.router)
