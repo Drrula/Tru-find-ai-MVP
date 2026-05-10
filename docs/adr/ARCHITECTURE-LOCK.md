@@ -2,18 +2,18 @@
 
 | Field | Value |
 |---|---|
-| Version | v1.5 |
-| Status | **Phase A complete** (closed 2026-05-09 per `docs/phase-a-exit.md`; Phase B unblocked, awaiting Andrew direction + optional §5.13 attorney input) |
-| Locked | 2026-05-09 |
-| Region | US East (Railway) |
-| Supersedes | v1.4 (extends with ADR-044: canonical event envelope and publisher abstraction). v1.3 (ADR-043: finance & commercial compliance placeholder). v1.2 (ADRs 035–042: lead intelligence, communication compliance, phone intelligence, compliance policy). See `LOCK-SUMMARY.md` for the questionnaire decisions that produced ADRs 035–042. |
+| Version | v1.6 |
+| Status | **Phase B.2 complete; B.3 planning locked** (B.2 closed 2026-05-10 at commit `792a2f1`; B.3.0 lands this revision + ADRs 045–048 per Platform Directive v1) |
+| Locked | 2026-05-10 |
+| Region | US East (Railway) — single-region operational; multi-region commitment + `account.region` tag introduced by ADR-046 (informational only in B.3) |
+| Supersedes | v1.5 (extends with ADRs 045–048: platform identity placeholder, multi-region posture, customer data ownership vs platform IP, vertical pack lifecycle — operationalizing ADR-011). v1.4 (ADR-044: canonical event envelope and publisher abstraction). v1.3 (ADR-043: finance & commercial compliance placeholder). v1.2 (ADRs 035–042: lead intelligence, communication compliance, phone intelligence, compliance policy). See `LOCK-SUMMARY.md` for the questionnaire decisions that produced ADRs 035–042. |
 | Change rule | See `docs/adr/README.md`. Modifying a Locked ADR or finalized schema requires a superseding ADR. Modifying a **Blocking ADR** (ADR-034) requires explicit review before implementation proceeds. |
 
 This document is the contract. Implementation conforms to it. Phase A may not begin until this is committed and acknowledged. Subsequent phases inherit every assumption stated here.
 
 ---
 
-## Part 1 — ADR index (44 entries)
+## Part 1 — ADR index (48 entries)
 
 The full text of each ADR is in `docs/adr/ADR-NNN-*.md`. Status legend:
 
@@ -67,8 +67,12 @@ The full text of each ADR is in `docs/adr/ADR-NNN-*.md`. Status legend:
 | 042 | Compliance Policy Layer (placeholder) | **Locked (placeholder)** | Yes |
 | 043 | Finance & commercial compliance (placeholder) | **Locked (placeholder)** | Yes |
 | 044 | Canonical event envelope and publisher abstraction | **Locked (placeholder)** | Yes |
+| 045 | Platform identity placeholder (`platform_core`) | **Locked (placeholder)** | No |
+| 046 | Multi-region / data-residency posture | **Locked** | Yes |
+| 047 | Customer data ownership vs. platform IP | **Locked** | Yes |
+| 048 | Vertical pack lifecycle (operationalizes ADR-011) | **Locked** | Yes |
 
-32 of 44 ADRs are Blocking ADRs. Any change to those, or any new ADR materially affecting the eight domains in ADR-034, requires explicit review before implementation proceeds.
+35 of 48 ADRs are Blocking ADRs. Any change to those, or any new ADR materially affecting the eight domains in ADR-034, requires explicit review before implementation proceeds.
 
 ---
 
