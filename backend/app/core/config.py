@@ -13,8 +13,13 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Local-dev default URL (matches infra/dev/docker-compose.yml). Auto-applied
+# by the model_validator below when DATABASE_URL is unset and APP_ENV is
+# development; staging / production must set the env var explicitly.
+_DEV_DATABASE_URL = "postgresql+asyncpg://trufindai:trufindai@localhost:5432/trufindai"
 
 
 class Settings(BaseSettings):
@@ -37,9 +42,15 @@ class Settings(BaseSettings):
     allowed_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
     rate_limit_per_minute: int = Field(default=60)
 
-    # --- Phase B placeholders (Postgres, Redis, auth) — ADR-002, ADR-003, ADR-018
+    # --- Postgres (ADR-002, B.1.1). DATABASE_URL is required when APP_ENV is
+    # staging / production; in development it defaults to the docker-compose URL.
     database_url: str | None = Field(default=None)
+    database_echo: bool = Field(default=False)
+
+    # --- Phase C placeholder (Redis) — ADR-003
     redis_url: str | None = Field(default=None)
+
+    # --- Phase B+ placeholders (auth) — ADR-018
     session_secret: str | None = Field(default=None)
     encryption_key: str | None = Field(default=None)
     magic_link_token_ttl_min: int = Field(default=15)
@@ -58,6 +69,23 @@ class Settings(BaseSettings):
     llm_api_key: str | None = Field(default=None)
     llm_model: str | None = Field(default=None)
     google_places_api_key: str | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _resolve_database_url(self) -> "Settings":
+        """Apply dev default; require explicit value in staging / production.
+
+        Per docs/phase-b-plan.md §6 (env-var contract).
+        """
+        if not self.database_url:
+            if self.app_env == "development":
+                # Mutable BaseSettings — direct assignment is fine.
+                self.database_url = _DEV_DATABASE_URL
+            else:
+                raise ValueError(
+                    f"DATABASE_URL is required when APP_ENV is {self.app_env!r}; "
+                    "set it explicitly in the environment."
+                )
+        return self
 
 
 @lru_cache(maxsize=1)

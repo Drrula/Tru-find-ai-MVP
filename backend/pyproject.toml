@@ -14,6 +14,9 @@ dependencies = [
     "pydantic-settings>=2.5.0,<3",
     "structlog>=24.4.0,<25",
     "sentry-sdk[fastapi]>=2.18,<3",
+    "sqlalchemy>=2.0,<3",
+    "asyncpg>=0.29,<1",
+    "alembic>=1.13,<2",
 ]
 
 [project.optional-dependencies]

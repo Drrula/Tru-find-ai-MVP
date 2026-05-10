@@ -1,0 +1,31 @@
+# Local development infrastructure.
+# DEV-ONLY credentials — Postgres on Railway uses managed credentials per environment.
+# Per docs/phase-b-plan.md §2 (topology).
+#
+# Bring up:    docker compose -f infra/dev/docker-compose.yml up -d postgres
+# Verify:      docker compose -f infra/dev/docker-compose.yml exec postgres pg_isready -U trufindai
+# Tear down:   docker compose -f infra/dev/docker-compose.yml down
+# Reset data:  docker compose -f infra/dev/docker-compose.yml down -v
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: trufindai_postgres_dev
+    environment:
+      POSTGRES_DB: trufindai
+      POSTGRES_USER: trufindai
+      POSTGRES_PASSWORD: trufindai
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trufindai -d trufindai"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  pg_data:
+    name: trufindai_pg_data
