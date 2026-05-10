@@ -13,5 +13,8 @@ public surface for DB access.
 from __future__ import annotations
 
 from app.db.models.account import Account
+from app.db.models.magic_link_token import MagicLinkToken
+from app.db.models.session import UserSession
+from app.db.models.user import User
 
-__all__ = ["Account"]
+__all__ = ["Account", "MagicLinkToken", "User", "UserSession"]
