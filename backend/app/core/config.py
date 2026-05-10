@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     session_secret: str | None = Field(default=None)
     encryption_key: str | None = Field(default=None)
     magic_link_token_ttl_min: int = Field(default=15)
+    # B.2.3 — absolute session TTL (no sliding refresh in B.2 per phase-b2-plan.md §2 #4)
+    session_ttl_days: int = Field(default=30)
 
     # --- Phase E placeholders (Stripe) — ADR-023, ADR-043
     stripe_secret_key: str | None = Field(default=None)
