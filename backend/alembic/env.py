@@ -24,7 +24,9 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from app.core.config import get_settings
 from app.db.base import Base
 
-# Future: `from app.db.models import *  # noqa` — added in B.1.4 once any model exists.
+# Register ORM models with Base.metadata so alembic autogenerate sees them.
+# B.1.4 adds the Account model; subsequent sub-phases extend models/__init__.py.
+from app.db.models import *  # noqa: F401, F403
 
 # Alembic Config object — read from alembic.ini
 config = context.config

@@ -69,7 +69,27 @@ In GitHub repo settings → Secrets and variables → Actions → New repository
 - `RAILWAY_TOKEN_STAGING` — staging token
 - `RAILWAY_TOKEN_PRODUCTION` — production token
 
-### 6. Verify the pipeline
+### 6. Provision Postgres add-on + enable PITR
+
+Per ADR-029 (backups + tested restore) and `docs/phase-b-plan.md` §7. Add-on the Railway Postgres service to each environment via the Railway dashboard (Project → environment → New service → Database → Postgres).
+
+**Production:** PITR (point-in-time recovery) is **required before any production write traffic.** In Railway dashboard:
+
+1. Project → `production` environment → Postgres service → Settings → Backups.
+2. Enable point-in-time recovery (PITR).
+3. Confirm the PITR retention window matches the Railway plan tier (consult Railway's current Postgres add-on docs for exact retention durations).
+
+**Staging:** PITR is recommended before B.2 auth tables land (so any leaked credential rotation has a defensible recovery point), but optional for the empty `account`-only state in B.1.
+
+**Quarterly restore drill** (per ADR-029):
+1. Note the current Postgres LSN / latest backup timestamp.
+2. Restore yesterday's snapshot into a scratch database via Railway dashboard.
+3. Run smoke query: `SELECT count(*) FROM account;`.
+4. Document elapsed time + any friction in `docs/ops/restore-drills/YYYY-QN.md`.
+
+After provisioning, set `DATABASE_URL` on the `api` service per environment to the connection string Railway exposes (typically available as `${{ Postgres.DATABASE_URL }}` reference in the dashboard). The runtime engine + alembic share this URL via `Settings.database_url` (per docs/phase-b-plan.md §3).
+
+### 7. Verify the pipeline
 
 - Push any docs change to `main`. Watch:
   - GitHub Actions → CI runs (~1 min)
