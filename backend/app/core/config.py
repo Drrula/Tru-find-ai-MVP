@@ -10,16 +10,24 @@ Per ADR-002, ADR-003, ADR-013, ADR-018, ADR-024, ADR-025, ADR-030.
 
 from __future__ import annotations
 
+import base64
 from functools import lru_cache
 from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Local-dev default URL (matches infra/dev/docker-compose.yml). Auto-applied
-# by the model_validator below when DATABASE_URL is unset and APP_ENV is
-# development; staging / production must set the env var explicitly.
+# Local-dev defaults. Auto-applied by the model_validator below when the
+# corresponding env var is unset and APP_ENV is development. Staging /
+# production must set each value explicitly (validator raises otherwise).
+#
+# Per docs/phase-b-plan.md §6 (DATABASE_URL) + docs/phase-b2-plan.md §8
+# (ENCRYPTION_KEY + SESSION_SECRET).
 _DEV_DATABASE_URL = "postgresql+asyncpg://trufindai:trufindai@localhost:5432/trufindai"
+# 32-byte zero key, base64-encoded. Cryptographically WEAK by design — the
+# validator below forbids this fallback in non-dev. Marked DEV ONLY.
+_DEV_ENCRYPTION_KEY = base64.b64encode(b"\x00" * 32).decode("ascii")
+_DEV_SESSION_SECRET = "dev-session-secret-do-not-use-in-non-dev"
 
 
 class Settings(BaseSettings):
@@ -71,20 +79,36 @@ class Settings(BaseSettings):
     google_places_api_key: str | None = Field(default=None)
 
     @model_validator(mode="after")
-    def _resolve_database_url(self) -> "Settings":
-        """Apply dev default; require explicit value in staging / production.
+    def _resolve_secrets(self) -> "Settings":
+        """Apply dev defaults; require explicit values in staging / production.
 
-        Per docs/phase-b-plan.md §6 (env-var contract).
+        Covers DATABASE_URL (per docs/phase-b-plan.md §6),
+        ENCRYPTION_KEY (per docs/phase-b2-plan.md §8 — AES-256-GCM key
+        used by app.core.crypto for PII encryption per ADR-013), and
+        SESSION_SECRET (per docs/phase-b2-plan.md §8 — HMAC key used to
+        sign session cookies per ADR-018).
+
+        In dev, each unset field falls back to a hardcoded constant
+        marked DEV ONLY. In staging / production, raises ValueError so
+        startup fails fast.
         """
-        if not self.database_url:
-            if self.app_env == "development":
-                # Mutable BaseSettings — direct assignment is fine.
-                self.database_url = _DEV_DATABASE_URL
-            else:
-                raise ValueError(
-                    f"DATABASE_URL is required when APP_ENV is {self.app_env!r}; "
-                    "set it explicitly in the environment."
-                )
+        # Order: validation reports the FIRST missing secret, so list
+        # them in the order an operator most likely needs to know about.
+        required: list[tuple[str, str]] = [
+            ("database_url", _DEV_DATABASE_URL),
+            ("encryption_key", _DEV_ENCRYPTION_KEY),
+            ("session_secret", _DEV_SESSION_SECRET),
+        ]
+        for field, dev_default in required:
+            if not getattr(self, field):
+                if self.app_env == "development":
+                    # Mutable BaseSettings — direct assignment is fine.
+                    setattr(self, field, dev_default)
+                else:
+                    raise ValueError(
+                        f"{field.upper()} is required when APP_ENV is "
+                        f"{self.app_env!r}; set it explicitly in the environment."
+                    )
         return self
 
 
