@@ -92,6 +92,7 @@ INDEX (user_id, expires_at)
 magic_link_token (
   id                    uuid PK,
   email_hash            bytea NOT NULL,
+  email_encrypted       bytea NOT NULL,               -- B.2.2-amend: AES-256-GCM ciphertext; consume decrypts to recover plaintext for self-signup
   token_hash            bytea NOT NULL UNIQUE,        -- sha256(plaintext_token); plaintext only in the email
   issued_at             timestamptz NOT NULL,
   expires_at            timestamptz NOT NULL,
@@ -100,6 +101,17 @@ magic_link_token (
 )
 INDEX (token_hash) WHERE consumed_at IS NULL
 ```
+
+> **B.2.2-amend note:** `email_encrypted` was added by migration 0006
+> (`0006_magic_link_token_email_encrypted`) after B.2.2 shipped. A design
+> gap surfaced during B.2.3 planning: the consume flow (§4 below)
+> needs the plaintext email to populate `user.email_encrypted` and
+> `account.display_name = local part of email` on self-signup, but the
+> consume URL only carries the opaque token. Storing the ciphertext on
+> the magic_link_token row at issue time keeps the email out of URLs
+> (per ADR-013) while letting consume recover the plaintext. The amend
+> was safe as a NOT NULL add because B.2.2 had not deployed past local
+> dev yet.
 
 ### Tenancy notes
 
@@ -114,8 +126,9 @@ INDEX (token_hash) WHERE consumed_at IS NULL
 ```
 Request a link
   → POST /v1/auth/request {"email": "..."}
-  → backend computes email_hash, mints plaintext_token (32 bytes urlsafe)
-  → INSERT magic_link_token (token_hash = sha256(plaintext_token))
+  → backend computes email_hash + email_encrypted (AES-256-GCM via app.core.crypto.encrypt)
+  → mints plaintext_token (32 bytes urlsafe via secrets.token_urlsafe(32))
+  → INSERT magic_link_token (email_hash, email_encrypted, token_hash = sha256(plaintext_token))
   → LoggingEmailSender.send(email, link) — link = f"{frontend_origin}/auth/consume?token={plaintext_token}"
   → return 200 always (decision #7)
 
@@ -125,10 +138,13 @@ Consume a link
   → SELECT magic_link_token WHERE token_hash=:h AND consumed_at IS NULL AND expires_at > now()
   → if not found: 401 (or 200 with redirect to /login?error=expired — TBD per frontend)
   → mark consumed_at = now()
-  → resolve user by email_hash:
+  → decrypt token.email_encrypted -> plaintext_email (per B.2.2-amend, see §3 note)
+  → resolve user by email_hash (UserRepository.find_by_email_hash, force_cross_account=True):
       if exists: reuse user + account
-      if not exists: create account (display_name = email local part)
-                    + user (account_id = new account, role = owner, email_hash, email_encrypted)
+      if not exists: create account (display_name = local-part-of-plaintext_email)
+                    + user (account_id = new account, role = owner,
+                            email_hash = token.email_hash,
+                            email_encrypted = token.email_encrypted)
   → INSERT session (user_id, account_id, issued_at, expires_at, ip_hash, user_agent)
   → set HttpOnly Secure-in-prod cookie "trufindai_session" with session.id (signed by SESSION_SECRET)
   → return 200 with user info (or redirect to frontend root)

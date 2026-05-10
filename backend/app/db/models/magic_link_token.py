@@ -11,6 +11,13 @@ account+user. Adding `account_id` here would require inventing it
 during the request half of the flow before we know what account the
 email belongs to.
 
+email_encrypted (added in B.2.2-amend / migration 0006) stores the
+AES-256-GCM ciphertext of the plaintext email — set by issue at
+request time, decrypted by consume to recover the local-part-of-email
+display_name and the email_encrypted value to write to the user row
+during self-signup. Per ADR-013, the email is never plaintext at rest
+and never appears in URLs.
+
 token_hash stores sha256(plaintext_token). The plaintext only ever
 exists in the email body; nothing in the DB can recover it. UNIQUE
 constraint covers deduplication and idempotency (per ADR-032).
@@ -58,6 +65,10 @@ class MagicLinkToken(Base):
         default=new_id,
     )
     email_hash: Mapped[bytes] = mapped_column(
+        LargeBinary,
+        nullable=False,
+    )
+    email_encrypted: Mapped[bytes] = mapped_column(
         LargeBinary,
         nullable=False,
     )

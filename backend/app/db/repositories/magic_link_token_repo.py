@@ -36,6 +36,7 @@ class MagicLinkTokenRepository(BaseRepository[MagicLinkToken]):
         self,
         *,
         email_hash: bytes,
+        email_encrypted: bytes,
         token_hash: bytes,
         issued_at: datetime,
         expires_at: datetime,
@@ -45,10 +46,16 @@ class MagicLinkTokenRepository(BaseRepository[MagicLinkToken]):
 
         Mints the UUIDv7 id explicitly so callers can read `.id`
         immediately for logging / audit purposes.
+
+        `email_encrypted` is the AES-256-GCM ciphertext of the plaintext
+        email; consume decrypts it (per docs/phase-b2-plan.md §4) to
+        populate `user.email_encrypted` on self-signup and to derive the
+        local-part-of-email `account.display_name`.
         """
         token = MagicLinkToken(
             id=new_id(),
             email_hash=email_hash,
+            email_encrypted=email_encrypted,
             token_hash=token_hash,
             issued_at=issued_at,
             expires_at=expires_at,

@@ -183,6 +183,7 @@ INDEX (user_id, expires_at)
 magic_link_token (
   id                    uuid PK,
   email_hash            bytea NOT NULL,
+  email_encrypted       bytea NOT NULL,            -- B.2.2-amend: ciphertext per ADR-013; consume decrypts for self-signup
   token_hash            bytea NOT NULL UNIQUE,
   issued_at, expires_at, consumed_at timestamptz NULL,
   ip_hash               bytea

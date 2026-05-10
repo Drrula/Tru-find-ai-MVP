@@ -88,6 +88,7 @@ async def test_create_assigns_uuidv7_id_and_stages_row(
 
     token = await repo.create(
         email_hash=b"\xe1" * 32,
+        email_encrypted=b"\xe4" * 64,  # B.2.2-amend: ciphertext from app.core.crypto.encrypt
         token_hash=b"\xe2" * 32,
         issued_at=issued,
         expires_at=expires,
@@ -98,6 +99,7 @@ async def test_create_assigns_uuidv7_id_and_stages_row(
     assert isinstance(token.id, UUID)
     assert token.id.version == 7
     assert token.email_hash == b"\xe1" * 32
+    assert token.email_encrypted == b"\xe4" * 64
     assert token.token_hash == b"\xe2" * 32
     assert token.issued_at == issued
     assert token.expires_at == expires
@@ -112,6 +114,7 @@ async def test_create_handles_none_ip_hash(mock_session: AsyncMock) -> None:
 
     token = await repo.create(
         email_hash=b"x" * 32,
+        email_encrypted=b"z" * 64,
         token_hash=b"y" * 32,
         issued_at=issued,
         expires_at=issued + timedelta(minutes=15),
@@ -119,6 +122,7 @@ async def test_create_handles_none_ip_hash(mock_session: AsyncMock) -> None:
     )
 
     assert token.ip_hash is None
+    assert token.email_encrypted == b"z" * 64
 
 
 # --- find_active_by_token_hash

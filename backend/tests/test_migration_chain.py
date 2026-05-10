@@ -134,8 +134,13 @@ def test_chain_is_linear_and_unbroken() -> None:
     )
 
 
-def test_b22_head_is_magic_link_token() -> None:
-    """After B.2.2 the chain head is 0005_magic_link_token."""
+def test_current_head_is_magic_link_token_email_encrypted() -> None:
+    """After B.2.2-amend the chain head is 0006_magic_link_token_email_encrypted.
+
+    (B.2.2 originally headed at 0005; a design gap surfaced during B.2.3
+    planning required adding email_encrypted to magic_link_token —
+    see docs/phase-b2-plan.md §4 + the 0006 migration docstring.)
+    """
     migrations = _load_all_migrations()
     revisions = {m.revision for _, m in migrations}
     children: dict[str, list[str]] = {rev: [] for rev in revisions}
@@ -144,13 +149,14 @@ def test_b22_head_is_magic_link_token() -> None:
             children[m.down_revision].append(m.revision)
 
     heads = [rev for rev, kids in children.items() if not kids]
-    assert heads == ["0005_magic_link_token"], (
-        f"expected single head 0005_magic_link_token; found {heads}"
+    assert heads == ["0006_magic_link_token_email_encrypted"], (
+        f"expected single head 0006_magic_link_token_email_encrypted; "
+        f"found {heads}"
     )
 
 
-def test_expected_b22_revisions_present() -> None:
-    """All B.2.2 revisions land in this commit."""
+def test_expected_revisions_present() -> None:
+    """All revisions through B.2.2-amend land in this branch."""
     revisions = {m.revision for _, m in _load_all_migrations()}
     expected = {
         "0001_baseline",
@@ -158,6 +164,7 @@ def test_expected_b22_revisions_present() -> None:
         "0003_user",
         "0004_session",
         "0005_magic_link_token",
+        "0006_magic_link_token_email_encrypted",
     }
     assert expected.issubset(revisions), (
         f"missing revisions: {expected - revisions}"
