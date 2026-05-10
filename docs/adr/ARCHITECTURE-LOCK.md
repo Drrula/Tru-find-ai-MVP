@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Version | v1.5 |
-| Status | **Final, pre-implementation** (B.0.0 doc gate; B.0.1 code begins on next direction) |
+| Status | **Phase A complete** (closed 2026-05-09 per `docs/phase-a-exit.md`; Phase B unblocked, awaiting Andrew direction + optional §5.13 attorney input) |
 | Locked | 2026-05-09 |
 | Region | US East (Railway) |
 | Supersedes | v1.4 (extends with ADR-044: canonical event envelope and publisher abstraction). v1.3 (ADR-043: finance & commercial compliance placeholder). v1.2 (ADRs 035–042: lead intelligence, communication compliance, phone intelligence, compliance policy). See `LOCK-SUMMARY.md` for the questionnaire decisions that produced ADRs 035–042. |
