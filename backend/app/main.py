@@ -20,12 +20,19 @@ from app.core.logging import configure_logging, get_logger
 from app.core.middleware import register_middleware
 from app.core.observability import init_sentry
 from app.schemas import AnalyzeRequest, AnalyzeResponse
+from app.vertical import load_default_packs
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(level=settings.log_level)
     init_sentry(dsn=settings.sentry_dsn, env=settings.app_env)
+
+    # Register canonical vertical packs (per ADR-048). Each pack's
+    # module __init__ side-effect-registers it with the registry; this
+    # call ensures the canonical packs are loaded before any request
+    # routes through the scoring engine.
+    load_default_packs()
 
     app = FastAPI(
         title="AI Visibility Scoring",

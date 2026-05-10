@@ -1,28 +1,37 @@
-"""Scoring orchestrator: runs the signal registry and blends the results."""
+"""Scoring orchestrator: runs the signal registry and blends the results.
+
+Per ADR-011 + ADR-048 (B.3.2): the engine is in core; the configuration
+(weights, copy, competitor pool, tier thresholds, category mapping,
+summary template) comes from the active vertical pack via
+`app.vertical.registry`. Future commits (B.3.4) swap the runtime
+source from the pack module to `vertical_*` DB rows via repositories;
+the engine signature here does not change.
+"""
 
 from hashlib import md5
 
+from app.core.config import get_settings
 from app.schemas import AnalyzeResponse, CategoryScores, Competitor
 from app.domain.signals import SIGNALS, SignalResult
+from app.vertical.pack import VerticalPack
+from app.vertical.registry import UnknownPackError, lookup
 
-# Map internal signal names to the four presentation categories the
-# Results Page renders. This is a presentation mapping, not a scoring change —
-# weights and signal logic are untouched.
-SIGNAL_TO_CATEGORY = {
-    "content_signals": "ai_presence",
-    "website_presence": "seo_strength",
-    "reviews": "authority",
-    "google_business_presence": "performance",
-}
+_DEFAULT_LOCALE = "en-US"
 
-COMPETITOR_POOL = [
-    "TopRank Local",
-    "PrimeFind Pros",
-    "Visible Edge",
-    "FirstPage Co.",
-    "Apex Listings",
-    "BrightSearch",
-]
+
+def _get_pack() -> VerticalPack:
+    """Resolve the active vertical pack (mirrors `signals._get_pack`).
+
+    Defensive fallback for test contexts that bypass `app.main`.
+    """
+    pack_id = get_settings().default_vertical_pack_id
+    try:
+        return lookup(pack_id)
+    except UnknownPackError:
+        from app.vertical import load_default_packs
+
+        load_default_packs()
+        return lookup(pack_id)
 
 
 def _blended_score(results: list[SignalResult]) -> int:
@@ -31,26 +40,47 @@ def _blended_score(results: list[SignalResult]) -> int:
     return round((weighted / total_weight) * 100)
 
 
-def _build_summary(business_name: str, score: int, gap_count: int) -> str:
-    if score >= 80:
-        tier = "strong"
-        advice = "Maintain momentum and focus on incremental improvements."
-    elif score >= 50:
-        tier = "moderate"
-        advice = "A few targeted fixes could meaningfully lift discoverability."
-    else:
-        tier = "weak"
-        advice = "Significant visibility work is needed before AI assistants and search engines will reliably surface this business."
-    gap_clause = f"{gap_count} gap(s) identified." if gap_count else "No major gaps detected."
-    return f"{business_name} has a {tier} AI visibility profile (score {score}/100). {gap_clause} {advice}"
+def _resolve_tier(score: int, thresholds: list[tuple[int, str]]) -> str:
+    """Select the first tier whose `min_score` is met. Thresholds expected
+    in DESCENDING order with a `(0, ...)` catch-all last."""
+    for min_score, tier_name in thresholds:
+        if score >= min_score:
+            return tier_name
+    return "unknown"  # defensive — should not occur with a well-formed pack
 
 
-def _build_category_scores(results: list[SignalResult]) -> CategoryScores:
+def _build_summary(
+    business_name: str, score: int, gap_count: int, pack: VerticalPack
+) -> str:
+    copy = pack.copy()
+    tier = _resolve_tier(score, pack.tier_thresholds())
+    advice = copy.get((_DEFAULT_LOCALE, f"tier.{tier}.advice"), "")
+    gap_clause = (
+        copy[(_DEFAULT_LOCALE, "summary.gap_count")].format(count=gap_count)
+        if gap_count
+        else copy[(_DEFAULT_LOCALE, "summary.no_gaps")]
+    )
+    template = copy[(_DEFAULT_LOCALE, "summary.template")]
+    return template.format(
+        business_name=business_name,
+        tier=tier,
+        score=score,
+        gap_clause=gap_clause,
+        advice=advice,
+    )
+
+
+def _build_category_scores(
+    results: list[SignalResult], pack: VerticalPack
+) -> CategoryScores:
+    mapping = pack.category_mapping()
     by_category = {
-        SIGNAL_TO_CATEGORY[r.name]: round(r.score * 100)
+        mapping[r.name]: round(r.score * 100)
         for r in results
-        if r.name in SIGNAL_TO_CATEGORY
+        if r.name in mapping
     }
+    # Target category names are fixed by the response schema; future
+    # verticals needing different categories require a schema change.
     return CategoryScores(
         ai_presence=by_category.get("ai_presence", 0),
         seo_strength=by_category.get("seo_strength", 0),
@@ -59,12 +89,16 @@ def _build_category_scores(results: list[SignalResult]) -> CategoryScores:
     )
 
 
-def _generate_competitors(business_name: str, location: str, score: int) -> list[Competitor]:
+def _generate_competitors(
+    business_name: str, location: str, score: int, pack: VerticalPack
+) -> list[Competitor]:
     seed = int(
-        md5(f"{business_name.lower().strip()}|{location.lower().strip()}|competitors".encode()).hexdigest(),
+        md5(
+            f"{business_name.lower().strip()}|{location.lower().strip()}|competitors".encode()
+        ).hexdigest(),
         16,
     )
-    pool = list(COMPETITOR_POOL)
+    pool = list(pack.competitor_pool())
     names: list[str] = []
     s = seed
     for _ in range(3):
@@ -83,12 +117,13 @@ def _generate_competitors(business_name: str, location: str, score: int) -> list
 
 
 def analyze(business_name: str, location: str, trade: str | None = None) -> AnalyzeResponse:
+    pack = _get_pack()
     results = [signal(business_name, location) for signal in SIGNALS]
     score = _blended_score(results)
     gaps = [r.gap for r in results if r.gap]
-    summary = _build_summary(business_name, score, len(gaps))
-    category_scores = _build_category_scores(results)
-    competitors = _generate_competitors(business_name, location, score)
+    summary = _build_summary(business_name, score, len(gaps), pack)
+    category_scores = _build_category_scores(results, pack)
+    competitors = _generate_competitors(business_name, location, score, pack)
     return AnalyzeResponse(
         score=score,
         gaps=gaps,

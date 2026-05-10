@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     # allowed_origins (CORS allowlist) to keep concerns separate.
     frontend_origin: str = Field(default="http://localhost:5173")
 
+    # B.3.2 — default vertical pack id (per ADR-048). The scoring engine
+    # resolves the active pack via `app.vertical.registry.lookup(...)`.
+    # Future commits replace this default with account-driven resolution
+    # via `account.vertical_id` once that column lands.
+    default_vertical_pack_id: str = Field(default="local_business_ai_visibility")
+
     # --- Postgres (ADR-002, B.1.1). DATABASE_URL is required when APP_ENV is
     # staging / production; in development it defaults to the docker-compose URL.
     database_url: str | None = Field(default=None)

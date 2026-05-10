@@ -240,13 +240,17 @@ def test_reference_pack_registers_on_import() -> None:
     assert pack.schema_version == 1
 
 
-def test_reference_pack_returns_empty_seed_data() -> None:
-    """B.3.1: stub returns empty values. B.3.2 fills these in."""
+def test_reference_pack_returns_populated_seed_data() -> None:
+    """B.3.2: pack now ships real content from sibling modules
+    (weights, copy, competitors, tiers, categories). Per-content
+    assertions live in `test_local_business_ai_visibility_pack.py`;
+    here we only verify the surfaces are non-empty so the registry
+    contract is exercised against real data."""
     from app.vertical.registry import lookup
 
     pack = lookup("local_business_ai_visibility")
-    assert pack.signal_weights() == {}
-    assert pack.copy() == {}
-    assert pack.competitor_pool() == []
-    assert pack.tier_thresholds() == []
-    assert pack.category_mapping() == {}
+    assert pack.signal_weights()          # non-empty dict
+    assert pack.copy()                    # non-empty dict
+    assert pack.competitor_pool()         # non-empty list
+    assert pack.tier_thresholds()         # non-empty list
+    assert pack.category_mapping()        # non-empty dict
