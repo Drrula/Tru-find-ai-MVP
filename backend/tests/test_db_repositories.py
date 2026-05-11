@@ -138,6 +138,40 @@ async def test_create_with_parent_account_id(mock_session: AsyncMock) -> None:
     assert acc.parent_account_id == parent
 
 
+async def test_create_default_region_falls_through_to_db_default(
+    mock_session: AsyncMock,
+) -> None:
+    """B.3.5: when `region` is not supplied, the repo does NOT pass the
+    kwarg to the Account constructor — the model's `default='us'` and
+    `server_default='us'` apply at flush time.
+
+    On the unflushed instance the attribute is None (SQLAlchemy column
+    defaults fire at flush, not at __init__), and the actual `'us'`
+    value lands when the INSERT executes. We assert both that no
+    region was staged AND that the column has the expected
+    server_default declaration."""
+    from app.db.models import Account
+
+    repo = AccountRepository(session=mock_session, account_id=None)
+
+    acc = await repo.create("Test")
+
+    # Unflushed instance has no explicit region.
+    assert acc.region is None
+    # The column declares server_default='us' so Postgres backfills.
+    assert "us" in str(Account.__table__.columns["region"].server_default.arg)
+
+
+async def test_create_with_explicit_region(mock_session: AsyncMock) -> None:
+    """B.3.5: caller can override the default per ADR-046's
+    `{'us','ca','uk'}` allowlist."""
+    repo = AccountRepository(session=mock_session, account_id=None)
+
+    acc = await repo.create("UK Tenant", region="uk")
+
+    assert acc.region == "uk"
+
+
 # --- AccountRepository.find_by_status
 
 

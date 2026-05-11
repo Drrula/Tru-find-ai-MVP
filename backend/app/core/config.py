@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     # via `account.vertical_id` once that column lands.
     default_vertical_pack_id: str = Field(default="local_business_ai_visibility")
 
+    # B.3.5 (per ADR-046) — default region tag for new account rows.
+    # Informational only in B.3 — no routing. Allowlist matches the
+    # account.region CHECK constraint: {'us', 'ca', 'uk'}.
+    default_region: str = Field(default="us")
+
     # --- Postgres (ADR-002, B.1.1). DATABASE_URL is required when APP_ENV is
     # staging / production; in development it defaults to the docker-compose URL.
     database_url: str | None = Field(default=None)

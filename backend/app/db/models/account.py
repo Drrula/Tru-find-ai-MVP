@@ -39,6 +39,10 @@ class Account(Base):
             "status IN ('active','suspended','closed')",
             name="account_status_check",
         ),
+        CheckConstraint(
+            "region IN ('us','ca','uk')",
+            name="account_region_check",
+        ),
         Index(
             "ix_account_parent_account_id",
             "parent_account_id",
@@ -65,6 +69,15 @@ class Account(Base):
         nullable=False,
         default="active",
         server_default="active",
+    )
+    # B.3.5 (per ADR-046): informational region tag. Allowlist enforced
+    # by the account_region_check CHECK constraint. No routing semantics
+    # in B.3 — this column is read by future region-aware code paths.
+    region: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        default="us",
+        server_default="us",
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

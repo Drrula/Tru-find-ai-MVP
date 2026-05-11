@@ -29,6 +29,7 @@ class AccountRepository(BaseRepository[Account]):
         display_name: str,
         *,
         parent_account_id: UUID | None = None,
+        region: str | None = None,
     ) -> Account:
         """Create a new account row.
 
@@ -36,12 +37,22 @@ class AccountRepository(BaseRepository[Account]):
         without waiting for `session.flush()` to populate it from the model's
         Python-side default. (The model's `default=new_id` still applies for
         any direct-construction code path that bypasses this repo.)
+
+        `region` (per ADR-046): if None, falls through to the model's
+        `default='us'` / server_default='us'. Pass explicitly (`'us'`,
+        `'ca'`, `'uk'`) when the caller has region context (e.g. from
+        geoip, user input). The CHECK constraint
+        `account_region_check` rejects out-of-allowlist values at the
+        DB layer.
         """
-        account = Account(
-            id=new_id(),
-            display_name=display_name,
-            parent_account_id=parent_account_id,
-        )
+        kwargs: dict = {
+            "id": new_id(),
+            "display_name": display_name,
+            "parent_account_id": parent_account_id,
+        }
+        if region is not None:
+            kwargs["region"] = region
+        account = Account(**kwargs)
         self.add(account)
         return account
 

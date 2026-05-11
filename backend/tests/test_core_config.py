@@ -155,3 +155,23 @@ def test_all_required_secrets_provided_in_production_passes(
     assert s.app_env == "production"
     assert s.encryption_key == "dGVzdA=="
     assert s.session_secret == "ssss"
+
+
+# --- B.3.5: default_region (per ADR-046)
+
+
+def test_default_region_defaults_to_us(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("DEFAULT_REGION", raising=False)
+    from app.core.config import Settings
+
+    s = Settings(_env_file=None, app_env="development")
+    assert s.default_region == "us"
+
+
+def test_default_region_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    from app.core.config import Settings
+
+    s = Settings(_env_file=None, app_env="development", default_region="ca")
+    assert s.default_region == "ca"

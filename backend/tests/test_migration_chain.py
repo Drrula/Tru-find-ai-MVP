@@ -134,10 +134,9 @@ def test_chain_is_linear_and_unbroken() -> None:
     )
 
 
-def test_current_head_is_vertical_prompt_version() -> None:
-    """After B.3.3 the chain head is 0011_vertical_prompt_version
-    (five vertical_* migrations chained on top of the B.2.2-amend head).
-    """
+def test_current_head_is_account_region() -> None:
+    """After B.3.5 the chain head is 0012_account_region (`account.region`
+    column added per ADR-046; informational tag only, no routing)."""
     migrations = _load_all_migrations()
     revisions = {m.revision for _, m in migrations}
     children: dict[str, list[str]] = {rev: [] for rev in revisions}
@@ -146,13 +145,13 @@ def test_current_head_is_vertical_prompt_version() -> None:
             children[m.down_revision].append(m.revision)
 
     heads = [rev for rev, kids in children.items() if not kids]
-    assert heads == ["0011_vertical_prompt_version"], (
-        f"expected single head 0011_vertical_prompt_version; found {heads}"
+    assert heads == ["0012_account_region"], (
+        f"expected single head 0012_account_region; found {heads}"
     )
 
 
 def test_expected_revisions_present() -> None:
-    """All revisions through B.3.3 land in this branch."""
+    """All revisions through B.3.5 land in this branch."""
     revisions = {m.revision for _, m in _load_all_migrations()}
     expected = {
         "0001_baseline",
@@ -166,6 +165,7 @@ def test_expected_revisions_present() -> None:
         "0009_vertical_copy",
         "0010_vertical_template",
         "0011_vertical_prompt_version",
+        "0012_account_region",
     }
     assert expected.issubset(revisions), (
         f"missing revisions: {expected - revisions}"
