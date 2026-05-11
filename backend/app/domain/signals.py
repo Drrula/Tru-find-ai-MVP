@@ -26,8 +26,9 @@ from typing import Any
 
 from app.clients.google_business import fetch_google_business
 from app.core.config import get_settings
+from app.vertical.db_pack import get_active_pack
 from app.vertical.pack import VerticalPack
-from app.vertical.registry import UnknownPackError, lookup
+from app.vertical.registry import UnknownPackError
 
 _DEFAULT_LOCALE = "en-US"
 
@@ -45,20 +46,21 @@ class SignalResult:
 
 
 def _get_pack() -> VerticalPack:
-    """Resolve the active vertical pack from the registry.
+    """Resolve the active vertical pack.
 
-    Defensive fallback: if the pack isn't registered (test contexts
-    that bypass `app.main`), call `load_default_packs()` to trigger
-    side-effect registration, then retry.
+    `app.vertical.db_pack.get_active_pack` returns the DB-backed pack
+    when the FastAPI lifespan populated the cache at startup;
+    otherwise falls back to the source-module pack via the registry.
+    Defensive load-on-miss for test contexts that bypass `app.main`.
     """
     pack_id = get_settings().default_vertical_pack_id
     try:
-        return lookup(pack_id)
+        return get_active_pack(pack_id)
     except UnknownPackError:
         from app.vertical import load_default_packs
 
         load_default_packs()
-        return lookup(pack_id)
+        return get_active_pack(pack_id)
 
 
 def _gap(pack: VerticalPack, key: str, **format_args: Any) -> str | None:

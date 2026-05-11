@@ -13,25 +13,33 @@ from hashlib import md5
 from app.core.config import get_settings
 from app.schemas import AnalyzeResponse, CategoryScores, Competitor
 from app.domain.signals import SIGNALS, SignalResult
+from app.vertical.db_pack import get_active_pack
 from app.vertical.pack import VerticalPack
-from app.vertical.registry import UnknownPackError, lookup
+from app.vertical.registry import UnknownPackError
 
 _DEFAULT_LOCALE = "en-US"
 
 
 def _get_pack() -> VerticalPack:
-    """Resolve the active vertical pack (mirrors `signals._get_pack`).
+    """Resolve the active vertical pack.
 
-    Defensive fallback for test contexts that bypass `app.main`.
+    `app.vertical.db_pack.get_active_pack` returns the DB-backed pack
+    when the FastAPI lifespan populated the cache at startup (per
+    ADR-048 stage "DB-runtime"); otherwise falls back to the
+    source-module pack via the registry. Test contexts that bypass
+    `app.main` get the source-module fallback automatically.
+
+    Defensive: if neither cache nor registry has the pack (configuration
+    error), call `load_default_packs()` once and retry.
     """
     pack_id = get_settings().default_vertical_pack_id
     try:
-        return lookup(pack_id)
+        return get_active_pack(pack_id)
     except UnknownPackError:
         from app.vertical import load_default_packs
 
         load_default_packs()
-        return lookup(pack_id)
+        return get_active_pack(pack_id)
 
 
 def _blended_score(results: list[SignalResult]) -> int:
