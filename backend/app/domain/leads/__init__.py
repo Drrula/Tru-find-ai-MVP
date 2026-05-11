@@ -10,8 +10,11 @@ Public surface:
   they want the structured log line.
 - `compute_lead_score` + `ComputedLeadScore` (B.5.2) -- pure
   deterministic scoring primitive. Reads stored signals + active
-  weights; returns (score, breakdown, inputs). Does NOT persist;
-  B.5.3's `record_lead_score` helper wraps compute + write.
+  weights; returns (score, breakdown, inputs). Does NOT persist.
+- `record_lead_score` (B.5.3) -- thin compute + write wrapper.
+  Calls `compute_lead_score` and stages a `lead_score_snapshot`
+  row via `LeadScoreSnapshotRepository`. No publish_event (mirrors
+  B.4.5 recording-helper discipline).
 
 Importing this package triggers side-effect registration of the
 lead.* event types with `app.core.event_registry` (mirrors the
@@ -26,7 +29,11 @@ from app.domain.leads.lifecycle import (
     LIFECYCLE_TRANSITION_EVENT_TYPE,
     transition,
 )
-from app.domain.leads.recording import record_lead_event, record_lead_signal
+from app.domain.leads.recording import (
+    record_lead_event,
+    record_lead_score,
+    record_lead_signal,
+)
 from app.domain.leads.scoring import ComputedLeadScore, compute_lead_score
 
 __all__ = [
@@ -35,6 +42,7 @@ __all__ = [
     "ComputedLeadScore",
     "compute_lead_score",
     "record_lead_event",
+    "record_lead_score",
     "record_lead_signal",
     "transition",
 ]

@@ -28,10 +28,16 @@ from app.db.models import (
     Lead,
     LeadEvent,
     LeadEventDefinition,
+    LeadScoreSnapshot,
     LeadSignal,
     LeadSignalDefinition,
 )
-from app.domain.leads.recording import record_lead_event, record_lead_signal
+from app.domain.leads.recording import (
+    record_lead_event,
+    record_lead_score,
+    record_lead_signal,
+)
+from app.domain.leads.scoring import ComputedLeadScore
 
 
 # --- Helpers
@@ -408,16 +414,315 @@ async def test_record_signal_returns_the_created_row(
 
 
 # ============================================================================
+# record_lead_score (B.5.3)
+# ============================================================================
+
+
+def _make_lead_score_snapshot(
+    lead: Lead, vertical_id: UUID, score: Decimal = Decimal("60.00")
+) -> LeadScoreSnapshot:
+    now = datetime.now(timezone.utc)
+    return LeadScoreSnapshot(
+        id=uuid4(),
+        account_id=lead.account_id,
+        lead_id=lead.id,
+        vertical_id=vertical_id,
+        score=score,
+        score_breakdown={"score": str(score)},
+        inputs={"signals": {}},
+        weight_version_at=now,
+        computed_at=now,
+    )
+
+
+async def test_record_score_happy_path(
+    monkeypatch: pytest.MonkeyPatch,
+    recording_publisher: RecordingEventPublisher,
+) -> None:
+    """Wires compute → repo.create. Verifies the snapshot is staged
+    with score, breakdown, inputs from compute and computed_at /
+    weight_version_at from now_fn()."""
+    lead = _make_lead()
+    vertical_id = uuid4()
+    fixed_now = datetime(2026, 5, 11, 12, 0, 0, tzinfo=timezone.utc)
+
+    fake_computed = ComputedLeadScore(
+        score=Decimal("72.50"),
+        breakdown={
+            "vertical_id": str(vertical_id),
+            "weight_version_at": fixed_now.isoformat(),
+            "score": "72.50",
+        },
+        inputs={"signals": {"review_count": {"value": {"score": 0.8}}}},
+    )
+
+    compute_mock = AsyncMock(return_value=fake_computed)
+    monkeypatch.setattr(
+        "app.domain.leads.recording.compute_lead_score", compute_mock
+    )
+
+    lead_signal_repo = AsyncMock()
+    weight_repo = AsyncMock()
+    score_repo = AsyncMock()
+    fake_snapshot = _make_lead_score_snapshot(
+        lead, vertical_id, Decimal("72.50")
+    )
+    score_repo.create = AsyncMock(return_value=fake_snapshot)
+
+    result = await record_lead_score(
+        lead=lead,
+        vertical_id=vertical_id,
+        lead_signal_repo=lead_signal_repo,
+        weight_repo=weight_repo,
+        score_repo=score_repo,
+        now_fn=lambda: fixed_now,
+    )
+
+    assert result is fake_snapshot
+
+    # compute_lead_score was called with the resolved weight_version_at
+    # (== now_fn() when not supplied).
+    compute_mock.assert_awaited_once()
+    compute_kwargs = compute_mock.await_args.kwargs
+    assert compute_kwargs["lead"] is lead
+    assert compute_kwargs["vertical_id"] == vertical_id
+    assert compute_kwargs["lead_signal_repo"] is lead_signal_repo
+    assert compute_kwargs["weight_repo"] is weight_repo
+    assert compute_kwargs["weight_version_at"] == fixed_now
+
+    # score_repo.create received the compute result + the SAME
+    # weight_version_at (must agree with the breakdown).
+    score_repo.create.assert_awaited_once()
+    create_kwargs = score_repo.create.await_args.kwargs
+    assert create_kwargs["lead"] is lead
+    assert create_kwargs["vertical_id"] == vertical_id
+    assert create_kwargs["score"] == Decimal("72.50")
+    assert create_kwargs["score_breakdown"] is fake_computed.breakdown
+    assert create_kwargs["inputs"] is fake_computed.inputs
+    assert create_kwargs["weight_version_at"] == fixed_now
+    assert create_kwargs["computed_at"] == fixed_now
+
+    # No publish_event side-effect (helper is the thin compute+write only).
+    assert recording_publisher.events == []
+
+
+async def test_record_score_with_explicit_weight_version_at_replays(
+    monkeypatch: pytest.MonkeyPatch,
+    recording_publisher: RecordingEventPublisher,
+) -> None:
+    """ADR-010 replay: pass a historical timestamp, and BOTH the
+    compute call and the snapshot row use it. computed_at remains
+    now_fn() (when the replay actually ran)."""
+    lead = _make_lead()
+    vertical_id = uuid4()
+    now = datetime(2026, 5, 11, 12, 0, 0, tzinfo=timezone.utc)
+    past = now - timedelta(days=30)
+
+    fake_computed = ComputedLeadScore(
+        score=Decimal("48.00"),
+        breakdown={"weight_version_at": past.isoformat(), "score": "48.00"},
+        inputs={"signals": {}},
+    )
+
+    compute_mock = AsyncMock(return_value=fake_computed)
+    monkeypatch.setattr(
+        "app.domain.leads.recording.compute_lead_score", compute_mock
+    )
+
+    score_repo = AsyncMock()
+    score_repo.create = AsyncMock(
+        return_value=_make_lead_score_snapshot(lead, vertical_id)
+    )
+
+    await record_lead_score(
+        lead=lead,
+        vertical_id=vertical_id,
+        lead_signal_repo=AsyncMock(),
+        weight_repo=AsyncMock(),
+        score_repo=score_repo,
+        weight_version_at=past,
+        now_fn=lambda: now,
+    )
+
+    # Replay: compute saw `past`, not `now`.
+    assert compute_mock.await_args.kwargs["weight_version_at"] == past
+
+    # Snapshot: weight_version_at = past (history), computed_at = now
+    # (when the replay ran).
+    create_kwargs = score_repo.create.await_args.kwargs
+    assert create_kwargs["weight_version_at"] == past
+    assert create_kwargs["computed_at"] == now
+
+
+async def test_record_score_zero_score_branch_still_persists(
+    monkeypatch: pytest.MonkeyPatch,
+    recording_publisher: RecordingEventPublisher,
+) -> None:
+    """The `no_weights_configured` / `all_signals_unobserved` branches
+    return score=0 from compute. The helper must still persist a
+    snapshot -- the zero IS observable history, not a no-op."""
+    lead = _make_lead()
+    vertical_id = uuid4()
+    fixed_now = datetime(2026, 5, 11, 12, 0, 0, tzinfo=timezone.utc)
+
+    fake_computed = ComputedLeadScore(
+        score=Decimal("0.00"),
+        breakdown={
+            "reason": "no_weights_configured",
+            "vertical_id": str(vertical_id),
+            "weight_version_at": fixed_now.isoformat(),
+            "score": "0.00",
+        },
+        inputs={"signals": {}},
+    )
+
+    monkeypatch.setattr(
+        "app.domain.leads.recording.compute_lead_score",
+        AsyncMock(return_value=fake_computed),
+    )
+
+    score_repo = AsyncMock()
+    score_repo.create = AsyncMock(
+        return_value=_make_lead_score_snapshot(
+            lead, vertical_id, Decimal("0.00")
+        )
+    )
+
+    await record_lead_score(
+        lead=lead,
+        vertical_id=vertical_id,
+        lead_signal_repo=AsyncMock(),
+        weight_repo=AsyncMock(),
+        score_repo=score_repo,
+        now_fn=lambda: fixed_now,
+    )
+
+    score_repo.create.assert_awaited_once()
+    create_kwargs = score_repo.create.await_args.kwargs
+    assert create_kwargs["score"] == Decimal("0.00")
+    assert create_kwargs["score_breakdown"]["reason"] == "no_weights_configured"
+
+
+async def test_record_score_propagates_compute_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+    recording_publisher: RecordingEventPublisher,
+) -> None:
+    """If compute raises (e.g. missing 'score' key in a signal value
+    per plan §2 #4), the helper does NOT swallow the error and does
+    NOT call score_repo.create. The write side-effect must not fire."""
+    lead = _make_lead()
+    vertical_id = uuid4()
+
+    compute_mock = AsyncMock(
+        side_effect=ValueError("lead_signal['review_count'].value missing")
+    )
+    monkeypatch.setattr(
+        "app.domain.leads.recording.compute_lead_score", compute_mock
+    )
+
+    score_repo = AsyncMock()
+
+    with pytest.raises(ValueError, match="missing"):
+        await record_lead_score(
+            lead=lead,
+            vertical_id=vertical_id,
+            lead_signal_repo=AsyncMock(),
+            weight_repo=AsyncMock(),
+            score_repo=score_repo,
+        )
+
+    score_repo.create.assert_not_called()
+    assert recording_publisher.events == []
+
+
+async def test_record_score_returns_the_created_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    recording_publisher: RecordingEventPublisher,
+) -> None:
+    lead = _make_lead()
+    vertical_id = uuid4()
+
+    monkeypatch.setattr(
+        "app.domain.leads.recording.compute_lead_score",
+        AsyncMock(
+            return_value=ComputedLeadScore(
+                score=Decimal("60.00"),
+                breakdown={"score": "60.00"},
+                inputs={"signals": {}},
+            )
+        ),
+    )
+
+    fake_snapshot = _make_lead_score_snapshot(lead, vertical_id)
+    score_repo = AsyncMock()
+    score_repo.create = AsyncMock(return_value=fake_snapshot)
+
+    result = await record_lead_score(
+        lead=lead,
+        vertical_id=vertical_id,
+        lead_signal_repo=AsyncMock(),
+        weight_repo=AsyncMock(),
+        score_repo=score_repo,
+    )
+
+    assert result is fake_snapshot
+
+
+async def test_record_score_passes_repos_through_to_compute(
+    monkeypatch: pytest.MonkeyPatch,
+    recording_publisher: RecordingEventPublisher,
+) -> None:
+    """Helper is a thin wrapper -- the repos given to it must be the
+    SAME objects handed to compute_lead_score. No proxying, no
+    rewrapping."""
+    lead = _make_lead()
+    vertical_id = uuid4()
+
+    compute_mock = AsyncMock(
+        return_value=ComputedLeadScore(
+            score=Decimal("50.00"),
+            breakdown={"score": "50.00"},
+            inputs={"signals": {}},
+        )
+    )
+    monkeypatch.setattr(
+        "app.domain.leads.recording.compute_lead_score", compute_mock
+    )
+
+    lead_signal_repo = AsyncMock()
+    weight_repo = AsyncMock()
+    score_repo = AsyncMock()
+    score_repo.create = AsyncMock(
+        return_value=_make_lead_score_snapshot(lead, vertical_id)
+    )
+
+    await record_lead_score(
+        lead=lead,
+        vertical_id=vertical_id,
+        lead_signal_repo=lead_signal_repo,
+        weight_repo=weight_repo,
+        score_repo=score_repo,
+    )
+
+    kwargs = compute_mock.await_args.kwargs
+    assert kwargs["lead_signal_repo"] is lead_signal_repo
+    assert kwargs["weight_repo"] is weight_repo
+
+
+# ============================================================================
 # Public surface re-export
 # ============================================================================
 
 
 def test_helpers_exposed_via_app_domain_leads_public_surface() -> None:
-    """Per phase-b4-plan.md §3 + inspectability discipline: both
-    helpers are part of the public surface of app.domain.leads."""
+    """Per phase-b4-plan.md §3 + phase-b5-plan.md §4 + inspectability
+    discipline: all three recording helpers are part of the public
+    surface of app.domain.leads."""
     import app.domain.leads as leads_pkg
 
     assert "record_lead_event" in leads_pkg.__all__
     assert "record_lead_signal" in leads_pkg.__all__
+    assert "record_lead_score" in leads_pkg.__all__
     assert callable(leads_pkg.record_lead_event)
     assert callable(leads_pkg.record_lead_signal)
+    assert callable(leads_pkg.record_lead_score)

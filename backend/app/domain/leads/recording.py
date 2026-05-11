@@ -1,14 +1,16 @@
 """Lead recording helpers — thin catalog-validation + write wrappers.
 
-Per docs/phase-b4-plan.md §5 + §9 + ADR-036 + ADR-040.
+Per docs/phase-b4-plan.md §5 + §9 + docs/phase-b5-plan.md §4 +
+ADR-036 + ADR-040 + ADR-010.
 
 Each helper does TWO things and ONLY those two things:
 
-  1. Validate that the supplied `event_type` or `signal_name` exists
-     in the corresponding DB catalog (lead_event_definition or
-     lead_signal_definition). Raise ValueError if missing.
+  1. Validate inputs (catalog row exists, or in the case of
+     `record_lead_score`, delegate the validation to
+     `compute_lead_score`).
   2. Stage a row via the appropriate repository, stamping
-     `recorded_at = now_fn()`.
+     `recorded_at = now_fn()` (or `computed_at = now_fn()` for the
+     score variant).
 
 NO publish_event call. NO orchestration. NO event-bus dispatch. NO
 hidden parallel writes. Callers who want a structured-log canonical
@@ -19,8 +21,8 @@ envelope emit it themselves:
 
 Two explicit lines, both readable from the call site -- preserves
 the trace test from feedback_inspectability_over_abstraction
-(lead -> signals -> lifecycle -> events readable from tables +
-repo methods alone).
+(lead -> signals -> lifecycle -> events -> scores readable from
+tables + repo methods alone).
 
 (Note: B.4.4's `lifecycle.transition` does both -- the DB write AND
 the canonical envelope publish -- because lifecycle transitions are
@@ -36,15 +38,22 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 from uuid import UUID
 
-from app.db.models import Lead, LeadEvent, LeadSignal
+from app.db.models import Lead, LeadEvent, LeadScoreSnapshot, LeadSignal
 from app.db.repositories.lead_event_definition_repo import (
     LeadEventDefinitionRepository,
 )
 from app.db.repositories.lead_event_repo import LeadEventRepository
+from app.db.repositories.lead_score_snapshot_repo import (
+    LeadScoreSnapshotRepository,
+)
 from app.db.repositories.lead_signal_definition_repo import (
     LeadSignalDefinitionRepository,
 )
 from app.db.repositories.lead_signal_repo import LeadSignalRepository
+from app.db.repositories.vertical_lead_signal_weight_repo import (
+    VerticalLeadSignalWeightRepository,
+)
+from app.domain.leads.scoring import compute_lead_score
 
 ActorKind = Literal["user", "system", "webhook", "job", "ai"]
 
@@ -186,4 +195,79 @@ async def record_lead_signal(
         observed_at=actual_observed_at,
         recorded_at=now,
         source_ref_id=source_ref_id,
+    )
+
+
+async def record_lead_score(
+    *,
+    lead: Lead,
+    vertical_id: UUID,
+    lead_signal_repo: LeadSignalRepository,
+    weight_repo: VerticalLeadSignalWeightRepository,
+    score_repo: LeadScoreSnapshotRepository,
+    weight_version_at: datetime | None = None,
+    now_fn: Callable[[], datetime] = _default_now,
+) -> LeadScoreSnapshot:
+    """Compute + persist a lead's score as a `lead_score_snapshot` row.
+
+    Thin wrapper: calls `compute_lead_score` (B.5.2) and stages the
+    result via `LeadScoreSnapshotRepository.create`. Mirrors the
+    record_lead_event / record_lead_signal shape from B.4.5 -- ONE
+    DB write, NO publish_event. Callers who want a canonical
+    envelope emit it themselves.
+
+    `weight_version_at` defaults to `now_fn()`, matching the
+    "score the lead against current weights" path. Pass explicitly
+    to reproduce a past score against historical weight rows
+    (ADR-010 replay semantics) -- the resolved value lands BOTH on
+    the compute call AND on the snapshot row so the stored
+    `weight_version_at` and the breakdown's `weight_version_at` agree.
+
+    `computed_at` on the snapshot is `now_fn()` at entry -- the
+    moment the compute ran.
+
+    Returns the newly-staged LeadScoreSnapshot (UUIDv7 id minted by
+    the repo; no flush yet -- caller controls the transaction).
+
+    Args:
+        lead: The lead this score is about. Used for FK +
+            denormalized account_id (per LeadScoreSnapshotRepository).
+        vertical_id: The vertical whose weights govern the score.
+            The same lead can score differently across verticals.
+        lead_signal_repo: customer-owned repo for reading current
+            observations (constructed with lead.account_id).
+        weight_repo: platform-owned repo for reading active weights
+            (constructed with account_id=None).
+        score_repo: customer-owned repo for staging the snapshot.
+        weight_version_at: Optional historical timestamp for replay.
+            Defaults to now_fn().
+        now_fn: Injectable clock for deterministic tests.
+
+    Raises:
+        ValueError: propagated from `compute_lead_score` if any
+            observation's `value` dict is missing its required
+            `'score'` key (per docs/phase-b5-plan.md §2 #4).
+    """
+    now = now_fn()
+    resolved_weight_at = (
+        weight_version_at if weight_version_at is not None else now
+    )
+
+    computed = await compute_lead_score(
+        lead=lead,
+        vertical_id=vertical_id,
+        lead_signal_repo=lead_signal_repo,
+        weight_repo=weight_repo,
+        weight_version_at=resolved_weight_at,
+        now_fn=now_fn,
+    )
+
+    return await score_repo.create(
+        lead=lead,
+        vertical_id=vertical_id,
+        score=computed.score,
+        score_breakdown=computed.breakdown,
+        inputs=computed.inputs,
+        weight_version_at=resolved_weight_at,
+        computed_at=now,
     )
