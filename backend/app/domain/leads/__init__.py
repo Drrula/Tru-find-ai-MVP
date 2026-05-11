@@ -4,8 +4,10 @@ Public surface:
 - `LIFECYCLE_STATES` + `transition` (B.4.4) -- the lifecycle state
   machine for leads. `transition` is the ONLY way
   `lead.lifecycle_state` should be mutated.
-- `record_lead_event` + `record_lead_signal` (B.4.5, pending) -- the
-  generic recording helpers.
+- `record_lead_event` + `record_lead_signal` (B.4.5) -- thin
+  catalog-validation + DB-write helpers. Neither publishes a
+  canonical envelope; callers emit `publish_event` separately if
+  they want the structured log line.
 
 Importing this package triggers side-effect registration of the
 lead.* event types with `app.core.event_registry` (mirrors the
@@ -20,9 +22,12 @@ from app.domain.leads.lifecycle import (
     LIFECYCLE_TRANSITION_EVENT_TYPE,
     transition,
 )
+from app.domain.leads.recording import record_lead_event, record_lead_signal
 
 __all__ = [
     "LIFECYCLE_STATES",
     "LIFECYCLE_TRANSITION_EVENT_TYPE",
+    "record_lead_event",
+    "record_lead_signal",
     "transition",
 ]
