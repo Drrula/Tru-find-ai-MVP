@@ -93,6 +93,52 @@ class VerticalLeadSignalWeightRepository(
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def find_all_active_for_vertical(
+        self,
+        vertical_id: UUID,
+        *,
+        at_time: datetime | None = None,
+    ) -> list[VerticalLeadSignalWeight]:
+        """Return all active weight rows for `vertical_id`.
+
+        Default mode (`at_time=None`): rows currently active --
+        `effective_to IS NULL`. This is the dominant operational
+        query ("what are the live weights for this vertical right
+        now?").
+
+        Replay mode (`at_time=<timestamp>`): rows active at that
+        moment -- `effective_from <= at_time` AND
+        `(effective_to IS NULL OR effective_to > at_time)`. Used by
+        `compute_lead_score` (B.5.2) for ADR-010 replay semantics
+        against historical weight versions.
+
+        Returns rows sorted by (signal_name, dimension) for
+        deterministic ordering. If multiple rows share a
+        (signal_name, dimension) tuple in active state (a discipline
+        violation -- exactly one active per tuple), all are returned;
+        caller decides how to handle.
+        """
+        stmt = select(VerticalLeadSignalWeight).where(
+            VerticalLeadSignalWeight.vertical_id == vertical_id
+        )
+        if at_time is None:
+            stmt = stmt.where(
+                VerticalLeadSignalWeight.effective_to.is_(None)
+            )
+        else:
+            stmt = stmt.where(
+                VerticalLeadSignalWeight.effective_from <= at_time
+            ).where(
+                (VerticalLeadSignalWeight.effective_to.is_(None))
+                | (VerticalLeadSignalWeight.effective_to > at_time)
+            )
+        stmt = stmt.order_by(
+            VerticalLeadSignalWeight.signal_name,
+            VerticalLeadSignalWeight.dimension,
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def close_active(
         self,
         vertical_id: UUID,

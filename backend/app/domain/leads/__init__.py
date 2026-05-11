@@ -8,6 +8,10 @@ Public surface:
   catalog-validation + DB-write helpers. Neither publishes a
   canonical envelope; callers emit `publish_event` separately if
   they want the structured log line.
+- `compute_lead_score` + `ComputedLeadScore` (B.5.2) -- pure
+  deterministic scoring primitive. Reads stored signals + active
+  weights; returns (score, breakdown, inputs). Does NOT persist;
+  B.5.3's `record_lead_score` helper wraps compute + write.
 
 Importing this package triggers side-effect registration of the
 lead.* event types with `app.core.event_registry` (mirrors the
@@ -23,10 +27,13 @@ from app.domain.leads.lifecycle import (
     transition,
 )
 from app.domain.leads.recording import record_lead_event, record_lead_signal
+from app.domain.leads.scoring import ComputedLeadScore, compute_lead_score
 
 __all__ = [
     "LIFECYCLE_STATES",
     "LIFECYCLE_TRANSITION_EVENT_TYPE",
+    "ComputedLeadScore",
+    "compute_lead_score",
     "record_lead_event",
     "record_lead_signal",
     "transition",

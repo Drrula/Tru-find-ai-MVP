@@ -416,3 +416,80 @@ async def test_weight_close_active_idempotent_no_op_returns_false(
     )
 
     assert closed is False
+
+
+# ============================================================================
+# B.5.2: VerticalLeadSignalWeightRepository.find_all_active_for_vertical
+# ============================================================================
+
+
+async def test_find_all_active_for_vertical_default_mode_filters_effective_to_null(
+    mock_session: AsyncMock,
+) -> None:
+    """Default mode (at_time=None) returns rows currently active --
+    effective_to IS NULL only."""
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = []
+    mock_session.execute.return_value = result
+
+    repo = VerticalLeadSignalWeightRepository(
+        session=mock_session, account_id=None
+    )
+    out = await repo.find_all_active_for_vertical(uuid4())
+
+    assert out == []
+    sent_stmt = mock_session.execute.await_args.args[0]
+    sql = " ".join(str(sent_stmt.compile()).lower().split())
+    assert "vertical_id" in sql
+    assert "effective_to is null" in sql
+    # Deterministic ordering by (signal_name, dimension).
+    assert "order by" in sql
+    assert "signal_name" in sql
+    assert "dimension" in sql
+
+
+async def test_find_all_active_for_vertical_replay_mode_at_historical_time(
+    mock_session: AsyncMock,
+) -> None:
+    """Replay mode: at_time supplied -> returns rows that were active
+    at that timestamp (effective_from <= at_time AND
+    (effective_to IS NULL OR effective_to > at_time))."""
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = []
+    mock_session.execute.return_value = result
+
+    repo = VerticalLeadSignalWeightRepository(
+        session=mock_session, account_id=None
+    )
+    historical = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    out = await repo.find_all_active_for_vertical(
+        uuid4(), at_time=historical
+    )
+
+    assert out == []
+    sent_stmt = mock_session.execute.await_args.args[0]
+    sql = " ".join(str(sent_stmt.compile()).lower().split())
+    assert "vertical_id" in sql
+    assert "effective_from" in sql  # effective_from <= at_time
+    assert "effective_to" in sql  # effective_to IS NULL OR effective_to > at_time
+    # Both branches of the historical-active predicate are present.
+    assert "is null" in sql
+
+
+async def test_find_all_active_for_vertical_no_rowcount_limit(
+    mock_session: AsyncMock,
+) -> None:
+    """Returns ALL active rows for the vertical -- no implicit LIMIT
+    (unlike find_active which is the singleton variant)."""
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = []
+    mock_session.execute.return_value = result
+
+    repo = VerticalLeadSignalWeightRepository(
+        session=mock_session, account_id=None
+    )
+    await repo.find_all_active_for_vertical(uuid4())
+
+    sent_stmt = mock_session.execute.await_args.args[0]
+    sql = " ".join(str(sent_stmt.compile()).lower().split())
+    assert "limit" not in sql
