@@ -58,13 +58,16 @@ def test_vertical_pack_protocol_has_attribute_and_method_surface() -> None:
     assert "display_name" in annotations
     assert "schema_version" in annotations
 
-    # Methods exist as callables on the Protocol.
+    # Methods exist as callables on the Protocol. `lead_signal_weights`
+    # is the B.4.6 additive extension (per ADR-048 -- adding methods
+    # later is additive; changing signatures requires a superseding ADR).
     for method_name in (
         "signal_weights",
         "copy",
         "competitor_pool",
         "tier_thresholds",
         "category_mapping",
+        "lead_signal_weights",
     ):
         assert hasattr(VerticalPack, method_name)
 

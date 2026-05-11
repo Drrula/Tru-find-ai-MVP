@@ -238,3 +238,21 @@ def test_category_mapping_matches_pre_b32_baseline() -> None:
     assert mapping["website_presence"] == "seo_strength"
     assert mapping["reviews"] == "authority"
     assert mapping["google_business_presence"] == "performance"
+
+
+# --- B.4.6: lead_signal_weights (additive Protocol extension per ADR-048)
+
+
+def test_lead_signal_weights_returns_empty_dict_in_b46() -> None:
+    """The reference pack ships an empty `lead_signal_weights` in B.4 --
+    real lead scoring activates in a later phase. The pathway exists
+    end-to-end (pack -> seed -> DB-backed pack) regardless."""
+    assert PACK.lead_signal_weights() == {}
+
+
+def test_lead_signal_weights_returns_a_copy() -> None:
+    """Like other surfaces, mutation on the returned dict must not
+    affect the pack instance."""
+    a = PACK.lead_signal_weights()
+    a["mutated"] = 99.0
+    assert PACK.lead_signal_weights() == {}

@@ -14,6 +14,7 @@ The `_pack_cache` is process-global, so every test clears it before
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Iterator
 from unittest.mock import AsyncMock, MagicMock
@@ -136,7 +137,9 @@ async def test_load_pack_from_db_returns_none_when_vertical_missing(
 async def test_load_pack_from_db_returns_populated_pack_on_happy_path(
     mock_session: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`vertical` + weights + copy + templates land in the returned pack."""
+    """`vertical` + weights + copy + templates + lead-signal-weights
+    (B.4.6) all land in the returned pack."""
+    from app.db.models import VerticalLeadSignalWeight
     from app.db.repositories.vertical_repo import VerticalRepository
 
     vid = uuid4()
@@ -150,8 +153,8 @@ async def test_load_pack_from_db_returns_populated_pack_on_happy_path(
         VerticalRepository, "find_by_pack_id", AsyncMock(return_value=vertical)
     )
 
-    # Mock session.execute responses for the three sub-loads.
-    # We return them in load order: weights, copy, templates.
+    # Mock session.execute responses for the FOUR sub-loads.
+    # Load order: weights -> copy -> templates -> lead_signal_weights.
     weight_rows = [
         VerticalSignalWeight(
             id=uuid4(),
@@ -195,6 +198,18 @@ async def test_load_pack_from_db_returns_populated_pack_on_happy_path(
             config_json={"mapping": {"reviews": "authority"}},
         ),
     ]
+    # B.4.6 lead-signal-weight rows (one active per signal_name).
+    lead_weight_rows = [
+        VerticalLeadSignalWeight(
+            id=uuid4(),
+            vertical_id=vid,
+            signal_name="lead_quality_score",
+            dimension="lead_quality",
+            weight=Decimal("0.4"),
+            effective_from=datetime.now(timezone.utc),
+            effective_to=None,
+        ),
+    ]
 
     def _make_result(rows):
         r = MagicMock()
@@ -205,6 +220,7 @@ async def test_load_pack_from_db_returns_populated_pack_on_happy_path(
         _make_result(weight_rows),
         _make_result(copy_rows),
         _make_result(template_rows),
+        _make_result(lead_weight_rows),  # B.4.6 4th sub-load
     ]
 
     pack = await load_pack_from_db(mock_session, "local_business_ai_visibility")
@@ -226,6 +242,8 @@ async def test_load_pack_from_db_returns_populated_pack_on_happy_path(
         (0, "weak"),
     ]
     assert pack.category_mapping() == {"reviews": "authority"}
+    # B.4.6: lead-signal weights present, flattened (dimension dropped).
+    assert pack.lead_signal_weights() == {"lead_quality_score": 0.4}
 
 
 async def test_load_pack_from_db_takes_latest_weight_per_signal(
@@ -266,16 +284,22 @@ async def test_load_pack_from_db_takes_latest_weight_per_signal(
             weight=Decimal("0.10"),  # earlier -> ignored
         ),
     ]
+    # 4 side-effects matching the 4 sub-loads in load_pack_from_db
+    # (weights -> copy -> templates -> lead-signal-weights). Empty
+    # lists for everything except the weights under test.
     results = [
         MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=rows)))),
         MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))),
         MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))),
+        MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))),  # B.4.6
     ]
     mock_session.execute.side_effect = results
 
     pack = await load_pack_from_db(mock_session, "x")
     assert pack is not None
     assert pack.signal_weights() == {"reviews": 0.25}
+    # B.4.6: no lead-signal-weight rows mocked -> empty flat dict.
+    assert pack.lead_signal_weights() == {}
 
 
 # --- populate_pack_cache

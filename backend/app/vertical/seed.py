@@ -7,11 +7,26 @@ deploy hooks to populate the DB rows that B.3.4's engine reads from.
 Idempotency contract for B.3.3:
 - If a `vertical` row with the pack's `pack_id` already exists,
   `seed_pack` returns it immediately as a no-op. Child rows
-  (weights, copy, templates) are NOT inspected — re-seeding a
-  modified pack requires explicit clear+re-seed by the operator.
+  (weights, copy, templates, lead-signal weights) are NOT inspected
+  — re-seeding a modified pack requires explicit clear+re-seed by
+  the operator.
 - On a fresh pack: creates the vertical row, then one row per
-  weight, one row per copy entry, and three template rows
-  (`tier_thresholds`, `competitor_pool`, `category_mapping`).
+  weight, one row per copy entry, three template rows
+  (`tier_thresholds`, `competitor_pool`, `category_mapping`), and
+  one row per `lead_signal_weights()` entry (B.4.6 — empty for the
+  reference pack today; the pathway exists end-to-end).
+
+B.4.6 lead-signal weight seeding (per phase-b4-plan.md §7):
+- The Protocol method `lead_signal_weights() -> dict[str, float]`
+  is a flat dict; the `vertical_lead_signal_weight` table carries
+  a `dimension` column in its natural key. The seed uses
+  `LEAD_SIGNAL_WEIGHT_DEFAULT_DIMENSION` (`'lead_quality'`) for
+  every entry returned by the pack. Multi-dimension support extends
+  the Protocol additively when real packs need it.
+- `effective_from` is stamped at seed time (`now()`-equivalent via
+  the column server_default? — no, we pass it explicitly so the
+  Python clock and DB clock agree). `effective_to` defaults to NULL
+  (active).
 
 The function does NOT call `session.commit()` — the caller controls
 the transaction boundary. Tests use mock sessions; operator scripts
@@ -20,16 +35,29 @@ wrap the call in their own commit/rollback.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Vertical
 from app.db.repositories.vertical_copy_repo import VerticalCopyRepository
+from app.db.repositories.vertical_lead_signal_weight_repo import (
+    VerticalLeadSignalWeightRepository,
+)
 from app.db.repositories.vertical_repo import VerticalRepository
 from app.db.repositories.vertical_signal_weight_repo import (
     VerticalSignalWeightRepository,
 )
 from app.db.repositories.vertical_template_repo import VerticalTemplateRepository
 from app.vertical.pack import VerticalPack
+
+#: The dimension used when seeding `vertical_lead_signal_weight` rows
+#: from the flat `pack.lead_signal_weights()` dict. Per ADR-036, the
+#: dimension represents WHICH dimension a signal contributes to
+#: ('lead_quality', 'engagement', 'ai_confidence', etc.). When real
+#: lead scoring activates, packs that need multi-dimension weights
+#: will gain an additive Protocol method.
+LEAD_SIGNAL_WEIGHT_DEFAULT_DIMENSION = "lead_quality"
 
 
 async def seed_pack(pack: VerticalPack, session: AsyncSession) -> Vertical:
@@ -85,5 +113,21 @@ async def seed_pack(pack: VerticalPack, session: AsyncSession) -> Vertical:
         name="category_mapping",
         config_json={"mapping": dict(pack.category_mapping())},
     )
+
+    # B.4.6: seed lead-signal weights. Empty pack -> zero rows; the
+    # pathway exists end-to-end regardless. Default dimension applies
+    # to every entry from the flat dict (see module docstring).
+    lead_weight_repo = VerticalLeadSignalWeightRepository(
+        session, account_id=None
+    )
+    now = datetime.now(timezone.utc)
+    for signal_name, weight in pack.lead_signal_weights().items():
+        await lead_weight_repo.create(
+            vertical_id=vertical.id,
+            signal_name=signal_name,
+            dimension=LEAD_SIGNAL_WEIGHT_DEFAULT_DIMENSION,
+            weight=weight,
+            effective_from=now,
+        )
 
     return vertical

@@ -19,6 +19,8 @@ Lifecycle (per ADR-048):
   remains the canonical SEED for new deployments + tests.
 - B.3.6: auth email subject + body templates moved into this
   pack's copy (brand-overlay role acknowledged).
+- B.4.6: lead_signal_weights() surface added (returns empty dict
+  for B.4 -- real lead scoring activates in a later phase).
 """
 
 from __future__ import annotations
@@ -31,6 +33,9 @@ from app.vertical.packs.local_business_ai_visibility.competitors import (
     COMPETITOR_POOL,
 )
 from app.vertical.packs.local_business_ai_visibility.copy import COPY
+from app.vertical.packs.local_business_ai_visibility.lead_signal_weights import (
+    LEAD_SIGNAL_WEIGHTS,
+)
 from app.vertical.packs.local_business_ai_visibility.tiers import TIERS
 from app.vertical.packs.local_business_ai_visibility.weights import WEIGHTS
 from app.vertical.registry import register
@@ -57,6 +62,9 @@ class _LocalBusinessAIVisibilityPack:
 
     def category_mapping(self) -> dict[str, str]:
         return dict(CATEGORY_MAPPING)
+
+    def lead_signal_weights(self) -> dict[str, float]:
+        return dict(LEAD_SIGNAL_WEIGHTS)
 
 
 #: Module-level singleton; the registry holds a reference to this instance.

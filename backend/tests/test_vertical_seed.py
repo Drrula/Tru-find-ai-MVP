@@ -51,12 +51,14 @@ async def test_seed_pack_fresh_db_creates_all_rows(
     assert result.pack_id == PACK.pack_id
 
     # session.add is the staging mechanism; count the total calls.
-    # Expected: 1 vertical + 4 weights + 13 copy + 3 templates = 21 staged.
+    # Expected: 1 vertical + 4 weights + 13 copy + 3 templates +
+    # 0 lead-signal-weights (B.4.6 empty pack) = 21 staged.
     expected_total = (
         1
         + len(PACK.signal_weights())
         + len(PACK.copy())
         + 3  # tier_thresholds, competitor_pool, category_mapping
+        + len(PACK.lead_signal_weights())  # B.4.6: 0 in the reference pack
     )
     assert mock_session.add.call_count == expected_total
 
@@ -187,3 +189,110 @@ async def test_seed_pack_template_config_json_shapes(
     assert by_name["category_mapping"].config_json["mapping"] == dict(
         PACK.category_mapping()
     )
+
+
+# ============================================================================
+# B.4.6: lead-signal weight seeding pathway
+# ============================================================================
+
+
+async def test_seed_pack_writes_zero_lead_signal_weights_for_empty_pack(
+    mock_session: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B.4.6 default state: the reference pack returns
+    `lead_signal_weights() == {}` so no VerticalLeadSignalWeight rows
+    are staged. The pathway code runs (loop iterates over zero
+    entries) but produces no writes."""
+    from app.db.models import VerticalLeadSignalWeight
+    from app.db.repositories.vertical_repo import VerticalRepository
+    from app.vertical.packs.local_business_ai_visibility import PACK
+    from app.vertical.seed import seed_pack
+
+    # Confirm precondition: B.4.6 reference pack is empty here.
+    assert PACK.lead_signal_weights() == {}
+
+    monkeypatch.setattr(
+        VerticalRepository, "find_by_pack_id", AsyncMock(return_value=None)
+    )
+
+    await seed_pack(PACK, mock_session)
+
+    staged_lead_weights = [
+        call.args[0]
+        for call in mock_session.add.call_args_list
+        if isinstance(call.args[0], VerticalLeadSignalWeight)
+    ]
+    assert staged_lead_weights == []
+
+
+async def test_seed_pack_writes_lead_signal_weights_with_default_dimension(
+    mock_session: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-empty `lead_signal_weights()` -> one row per entry with the
+    documented default dimension `'lead_quality'`. Future packs that
+    need multi-dimension weights extend the Protocol additively; B.4.6
+    handles the flat-dict case end-to-end."""
+    from decimal import Decimal as _Decimal
+
+    from app.db.models import Vertical, VerticalLeadSignalWeight
+    from app.db.repositories.vertical_repo import VerticalRepository
+    from app.vertical.seed import (
+        LEAD_SIGNAL_WEIGHT_DEFAULT_DIMENSION,
+        seed_pack,
+    )
+
+    # Build a synthetic pack with non-empty lead_signal_weights.
+    class _PackWithLeadWeights:
+        pack_id = "synthetic_with_lead_weights"
+        display_name = "Synthetic"
+        schema_version = 1
+
+        def signal_weights(self) -> dict[str, float]:
+            return {}
+
+        def copy(self) -> dict[tuple[str, str], str]:
+            return {}
+
+        def competitor_pool(self) -> list[str]:
+            return []
+
+        def tier_thresholds(self) -> list[tuple[int, str]]:
+            return []
+
+        def category_mapping(self) -> dict[str, str]:
+            return {}
+
+        def lead_signal_weights(self) -> dict[str, float]:
+            return {"signal_a": 0.4, "signal_b": 0.6}
+
+    monkeypatch.setattr(
+        VerticalRepository, "find_by_pack_id", AsyncMock(return_value=None)
+    )
+
+    pack = _PackWithLeadWeights()
+    await seed_pack(pack, mock_session)
+
+    staged_lead_weights = [
+        call.args[0]
+        for call in mock_session.add.call_args_list
+        if isinstance(call.args[0], VerticalLeadSignalWeight)
+    ]
+    assert {w.signal_name for w in staged_lead_weights} == {"signal_a", "signal_b"}
+
+    # All rows carry the documented default dimension.
+    assert all(
+        w.dimension == LEAD_SIGNAL_WEIGHT_DEFAULT_DIMENSION
+        for w in staged_lead_weights
+    )
+    assert LEAD_SIGNAL_WEIGHT_DEFAULT_DIMENSION == "lead_quality"
+
+    # Weights converted to Decimal by the repo (matches
+    # VerticalLeadSignalWeightRepository.create behavior).
+    for w in staged_lead_weights:
+        assert isinstance(w.weight, _Decimal)
+
+    # effective_from is stamped at seed time (not NULL); effective_to
+    # defaults to NULL (active row).
+    for w in staged_lead_weights:
+        assert w.effective_from is not None
+        assert w.effective_to is None

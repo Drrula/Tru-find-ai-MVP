@@ -79,3 +79,23 @@ class VerticalPack(Protocol):
         NOT affect scoring. Seed for the category portion of
         `vertical_template`."""
         ...
+
+    # B.4.6 additive Protocol extension (per ADR-048 + ADR-036 +
+    # phase-b4-plan.md §7).
+
+    def lead_signal_weights(self) -> dict[str, float]:
+        """`signal_name -> weight` for LEAD signal weights (distinct
+        from `signal_weights()` which is for business-analysis
+        signals). Used by future lead scoring; seed for
+        `vertical_lead_signal_weight` rows.
+
+        Flat dict by design. The `vertical_lead_signal_weight` schema
+        carries a `dimension` column; the seed utility uses
+        `'lead_quality'` as the documented default dimension for any
+        signal returned here. Multi-dimension support extends the
+        Protocol additively when real packs need it.
+
+        B.4 ships empty `{}` on the reference pack — real lead
+        scoring activates in a later phase. The pathway exists
+        end-to-end (pack -> seed -> DB-backed pack at startup)."""
+        ...

@@ -63,6 +63,7 @@ class DatabaseBackedVerticalPack:
         competitor_pool: list[str],
         tier_thresholds: list[tuple[int, str]],
         category_mapping: dict[str, str],
+        lead_signal_weights: dict[str, float] | None = None,
     ) -> None:
         self.pack_id = pack_id
         self.display_name = display_name
@@ -72,6 +73,10 @@ class DatabaseBackedVerticalPack:
         self._competitor_pool = competitor_pool
         self._tier_thresholds = tier_thresholds
         self._category_mapping = category_mapping
+        # B.4.6 additive Protocol surface. Defaults to empty dict so
+        # existing test constructors (which don't pass this kwarg) keep
+        # working with the same shape.
+        self._lead_signal_weights = lead_signal_weights or {}
 
     def signal_weights(self) -> dict[str, float]:
         return dict(self._weights)
@@ -87,6 +92,9 @@ class DatabaseBackedVerticalPack:
 
     def category_mapping(self) -> dict[str, str]:
         return dict(self._category_mapping)
+
+    def lead_signal_weights(self) -> dict[str, float]:
+        return dict(self._lead_signal_weights)
 
 
 # --- DB loading
@@ -137,6 +145,48 @@ async def _load_templates(
     return {row.name: row.config_json for row in result.scalars().all()}
 
 
+async def _load_current_lead_signal_weights(
+    session: AsyncSession, vertical_id: UUID
+) -> dict[str, float]:
+    """Load currently-active lead-signal weights, flattened to
+    `{signal_name: weight}` for the Protocol's flat-dict shape.
+
+    "Currently active" = `effective_to IS NULL`. Same dedup pattern
+    as `_load_current_weights`: take the latest `effective_from`
+    per signal_name if multiple unclosed rows exist (which is a
+    discipline violation but tolerated at read time).
+
+    DROPS the `dimension` column when flattening -- the Protocol's
+    flat-dict shape predates multi-dimension support. When real
+    packs need multi-dimension weights, an additive Protocol method
+    extends the read path.
+
+    Returns an empty dict if no weight rows exist (B.4.6 default
+    state with the empty reference pack).
+    """
+    # Avoid importing at module-load time so seed-utility imports
+    # don't pull this in unconditionally; the model is a B.4.3
+    # addition and keeping the import local mirrors the lazy pattern
+    # already used elsewhere in this module.
+    from app.db.models import VerticalLeadSignalWeight
+
+    stmt = (
+        select(VerticalLeadSignalWeight)
+        .where(VerticalLeadSignalWeight.vertical_id == vertical_id)
+        .where(VerticalLeadSignalWeight.effective_to.is_(None))
+        .order_by(
+            VerticalLeadSignalWeight.signal_name,
+            VerticalLeadSignalWeight.effective_from.desc(),
+        )
+    )
+    result = await session.execute(stmt)
+    weights: dict[str, float] = {}
+    for row in result.scalars().all():
+        if row.signal_name not in weights:
+            weights[row.signal_name] = float(row.weight)
+    return weights
+
+
 async def load_pack_from_db(
     session: AsyncSession, pack_id: str
 ) -> DatabaseBackedVerticalPack | None:
@@ -153,6 +203,11 @@ async def load_pack_from_db(
     weights = await _load_current_weights(session, vertical.id)
     copy_map = await _load_copy(session, vertical.id)
     templates = await _load_templates(session, vertical.id)
+    # B.4.6: load lead-signal weights (B.4.3 schema). Empty result
+    # is the B.4.6 default since the reference pack returns {}.
+    lead_signal_weights = await _load_current_lead_signal_weights(
+        session, vertical.id
+    )
 
     return DatabaseBackedVerticalPack(
         pack_id=vertical.pack_id,
@@ -174,6 +229,7 @@ async def load_pack_from_db(
         category_mapping=dict(
             templates.get("category_mapping", {}).get("mapping", {})
         ),
+        lead_signal_weights=lead_signal_weights,
     )
 
 
