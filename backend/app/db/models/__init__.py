@@ -16,5 +16,20 @@ from app.db.models.account import Account
 from app.db.models.magic_link_token import MagicLinkToken
 from app.db.models.session import UserSession
 from app.db.models.user import User
+from app.db.models.vertical import Vertical
+from app.db.models.vertical_copy import VerticalCopy
+from app.db.models.vertical_prompt_version import VerticalPromptVersion
+from app.db.models.vertical_signal_weight import VerticalSignalWeight
+from app.db.models.vertical_template import VerticalTemplate
 
-__all__ = ["Account", "MagicLinkToken", "User", "UserSession"]
+__all__ = [
+    "Account",
+    "MagicLinkToken",
+    "User",
+    "UserSession",
+    "Vertical",
+    "VerticalCopy",
+    "VerticalPromptVersion",
+    "VerticalSignalWeight",
+    "VerticalTemplate",
+]

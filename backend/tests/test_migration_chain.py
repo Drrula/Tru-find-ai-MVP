@@ -134,12 +134,9 @@ def test_chain_is_linear_and_unbroken() -> None:
     )
 
 
-def test_current_head_is_magic_link_token_email_encrypted() -> None:
-    """After B.2.2-amend the chain head is 0006_magic_link_token_email_encrypted.
-
-    (B.2.2 originally headed at 0005; a design gap surfaced during B.2.3
-    planning required adding email_encrypted to magic_link_token —
-    see docs/phase-b2-plan.md §4 + the 0006 migration docstring.)
+def test_current_head_is_vertical_prompt_version() -> None:
+    """After B.3.3 the chain head is 0011_vertical_prompt_version
+    (five vertical_* migrations chained on top of the B.2.2-amend head).
     """
     migrations = _load_all_migrations()
     revisions = {m.revision for _, m in migrations}
@@ -149,14 +146,13 @@ def test_current_head_is_magic_link_token_email_encrypted() -> None:
             children[m.down_revision].append(m.revision)
 
     heads = [rev for rev, kids in children.items() if not kids]
-    assert heads == ["0006_magic_link_token_email_encrypted"], (
-        f"expected single head 0006_magic_link_token_email_encrypted; "
-        f"found {heads}"
+    assert heads == ["0011_vertical_prompt_version"], (
+        f"expected single head 0011_vertical_prompt_version; found {heads}"
     )
 
 
 def test_expected_revisions_present() -> None:
-    """All revisions through B.2.2-amend land in this branch."""
+    """All revisions through B.3.3 land in this branch."""
     revisions = {m.revision for _, m in _load_all_migrations()}
     expected = {
         "0001_baseline",
@@ -165,6 +161,11 @@ def test_expected_revisions_present() -> None:
         "0004_session",
         "0005_magic_link_token",
         "0006_magic_link_token_email_encrypted",
+        "0007_vertical",
+        "0008_vertical_signal_weight",
+        "0009_vertical_copy",
+        "0010_vertical_template",
+        "0011_vertical_prompt_version",
     }
     assert expected.issubset(revisions), (
         f"missing revisions: {expected - revisions}"
