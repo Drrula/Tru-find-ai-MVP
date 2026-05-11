@@ -134,9 +134,10 @@ def test_chain_is_linear_and_unbroken() -> None:
     )
 
 
-def test_current_head_is_lead_event() -> None:
-    """After B.4.2 the chain head is 0015_lead_event (append-only
-    timeline projection per ADR-044 + phase-b4-plan.md §4)."""
+def test_current_head_is_vertical_lead_signal_weight() -> None:
+    """After B.4.3 the chain head is 0018_vertical_lead_signal_weight
+    (per-vertical signal weight history per ADR-011 + ADR-036 +
+    phase-b4-plan.md §4)."""
     migrations = _load_all_migrations()
     revisions = {m.revision for _, m in migrations}
     children: dict[str, list[str]] = {rev: [] for rev in revisions}
@@ -145,13 +146,13 @@ def test_current_head_is_lead_event() -> None:
             children[m.down_revision].append(m.revision)
 
     heads = [rev for rev, kids in children.items() if not kids]
-    assert heads == ["0015_lead_event"], (
-        f"expected single head 0015_lead_event; found {heads}"
+    assert heads == ["0018_vertical_lead_signal_weight"], (
+        f"expected single head 0018_vertical_lead_signal_weight; found {heads}"
     )
 
 
 def test_expected_revisions_present() -> None:
-    """All revisions through B.4.2 land in this branch."""
+    """All revisions through B.4.3 land in this branch."""
     revisions = {m.revision for _, m in _load_all_migrations()}
     expected = {
         "0001_baseline",
@@ -169,6 +170,9 @@ def test_expected_revisions_present() -> None:
         "0013_lead",
         "0014_lead_event_definition",
         "0015_lead_event",
+        "0016_lead_signal_definition",
+        "0017_lead_signal",
+        "0018_vertical_lead_signal_weight",
     }
     assert expected.issubset(revisions), (
         f"missing revisions: {expected - revisions}"

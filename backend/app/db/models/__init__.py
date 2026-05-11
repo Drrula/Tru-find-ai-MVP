@@ -16,11 +16,14 @@ from app.db.models.account import Account
 from app.db.models.lead import Lead
 from app.db.models.lead_event import LeadEvent
 from app.db.models.lead_event_definition import LeadEventDefinition
+from app.db.models.lead_signal import LeadSignal
+from app.db.models.lead_signal_definition import LeadSignalDefinition
 from app.db.models.magic_link_token import MagicLinkToken
 from app.db.models.session import UserSession
 from app.db.models.user import User
 from app.db.models.vertical import Vertical
 from app.db.models.vertical_copy import VerticalCopy
+from app.db.models.vertical_lead_signal_weight import VerticalLeadSignalWeight
 from app.db.models.vertical_prompt_version import VerticalPromptVersion
 from app.db.models.vertical_signal_weight import VerticalSignalWeight
 from app.db.models.vertical_template import VerticalTemplate
@@ -30,11 +33,14 @@ __all__ = [
     "Lead",
     "LeadEvent",
     "LeadEventDefinition",
+    "LeadSignal",
+    "LeadSignalDefinition",
     "MagicLinkToken",
     "User",
     "UserSession",
     "Vertical",
     "VerticalCopy",
+    "VerticalLeadSignalWeight",
     "VerticalPromptVersion",
     "VerticalSignalWeight",
     "VerticalTemplate",
