@@ -7,6 +7,12 @@ EmailSender. ALWAYS succeeds from the caller's perspective —
 email-enumeration protection (decision #7) is the routes layer's
 job (always 200 regardless of outcome here).
 
+B.3.6 (per ADR-045 + phase-b3-plan.md §9): the email subject + body
+are NOT hardcoded here — they come from the active vertical pack's
+copy table under the keys `auth.email.sign_in.subject` and
+`auth.email.sign_in.body`. The body template carries `{link}` and
+`{minutes}` placeholders.
+
 `now_fn` and `token_fn` are injectable for deterministic testing;
 production callers omit them and get `datetime.now(timezone.utc)` +
 `secrets.token_urlsafe(32)` respectively.
@@ -24,6 +30,11 @@ from app.core.crypto import encrypt, hash_for_lookup
 from app.core.events import publish_event
 from app.db.repositories.magic_link_token_repo import MagicLinkTokenRepository
 from app.domain.notifications.email import EmailSender
+from app.vertical.db_pack import get_active_pack
+from app.vertical.pack import VerticalPack
+from app.vertical.registry import UnknownPackError
+
+_DEFAULT_LOCALE = "en-US"
 
 
 def _default_now() -> datetime:
@@ -33,6 +44,24 @@ def _default_now() -> datetime:
 def _default_token() -> str:
     # 32 random bytes -> ~43-char URL-safe string. Per phase-b2-plan.md §4.
     return secrets.token_urlsafe(32)
+
+
+def _get_pack() -> VerticalPack:
+    """Resolve the active vertical pack for auth email copy.
+
+    Same pattern as `app.domain.scoring._get_pack` /
+    `app.domain.signals._get_pack`: DB-backed pack on cache hit,
+    source-module fallback on miss, defensive load-on-miss for test
+    contexts that bypass `app.main`.
+    """
+    pack_id = get_settings().default_vertical_pack_id
+    try:
+        return get_active_pack(pack_id)
+    except UnknownPackError:
+        from app.vertical import load_default_packs
+
+        load_default_packs()
+        return get_active_pack(pack_id)
 
 
 async def issue_magic_link(
@@ -85,14 +114,21 @@ async def issue_magic_link(
 
     link = f"{frontend_origin.rstrip('/')}/auth/consume?token={plaintext_token}"
     minutes = int(ttl.total_seconds() // 60)
-    body = (
-        f"Click this link to sign in to TruFindAI:\n\n{link}\n\n"
-        f"The link expires in {minutes} minutes. If you did not request "
-        "this, you can safely ignore this email."
-    )
+
+    # Resolve subject + body from the active vertical pack's copy.
+    # Per ADR-045 + phase-b3-plan.md §9, brand strings live in the
+    # pack, not in this file. A pack missing these keys will raise
+    # KeyError -- caught by the routes layer's email-enumeration
+    # protection (always-200), so operators see the failure in logs
+    # without leaking it to the caller.
+    pack_copy = _get_pack().copy()
+    subject = pack_copy[(_DEFAULT_LOCALE, "auth.email.sign_in.subject")]
+    body_template = pack_copy[(_DEFAULT_LOCALE, "auth.email.sign_in.body")]
+    body = body_template.format(link=link, minutes=minutes)
+
     await email_sender.send(
         to=email,
-        subject="Your TruFindAI sign-in link",
+        subject=subject,
         body_text=body,
     )
 

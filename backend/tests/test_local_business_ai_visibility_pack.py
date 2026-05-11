@@ -121,10 +121,45 @@ def test_copy_locale_is_en_us_only_in_b32() -> None:
     assert locales == {"en-US"}
 
 
-def test_copy_does_not_leak_trufindai_brand_string() -> None:
-    """Per ADR-045: this pack describes the WORK, not the deployed brand."""
-    for text in PACK.copy().values():
-        assert "TruFindAI" not in text
+# --- B.3.6: auth email copy keys (moved from app/domain/auth/issue.py
+# per ADR-045 + phase-b3-plan.md §9).
+
+
+def test_copy_contains_auth_email_sign_in_subject() -> None:
+    """Auth's `issue_magic_link` resolves the subject from this key."""
+    assert ("en-US", "auth.email.sign_in.subject") in PACK.copy()
+
+
+def test_copy_contains_auth_email_sign_in_body() -> None:
+    """Auth's `issue_magic_link` resolves the body template from this
+    key. The template carries `{link}` and `{minutes}` placeholders."""
+    body = PACK.copy().get(("en-US", "auth.email.sign_in.body"))
+    assert body is not None
+    assert "{link}" in body
+    assert "{minutes}" in body
+
+
+def test_copy_auth_subject_includes_brand() -> None:
+    """B.3.6: brand strings are EXPECTED to live in the pack copy now
+    (per phase-b3-plan.md §3). The pack carries the TruFindAI brand
+    because the local-business-AI-visibility pack is currently
+    TruFindAI's primary vertical. A future brand-overlay pack pattern
+    would split brand from work; for now they co-live."""
+    subject = PACK.copy()[("en-US", "auth.email.sign_in.subject")]
+    assert "TruFindAI" in subject
+
+
+def test_copy_non_auth_strings_describe_the_work_not_the_brand() -> None:
+    """The WORK strings (gap descriptions, tier advice, summary
+    template) describe local-business AI-visibility scoring outputs
+    -- they should NOT carry the deployed brand. Only `auth.*` keys
+    are brand-overlay."""
+    for (locale, key), text in PACK.copy().items():
+        if key.startswith("auth."):
+            continue  # auth.* keys are brand-overlay; skip
+        assert "TruFindAI" not in text, (
+            f"work-string key {key!r} unexpectedly contains brand"
+        )
 
 
 # --- competitor_pool

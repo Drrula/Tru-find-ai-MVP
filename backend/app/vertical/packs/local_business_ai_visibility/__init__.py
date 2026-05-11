@@ -1,19 +1,24 @@
 """Reference vertical pack: local-business AI visibility.
 
-B.3.2 fills in the configuration surfaces from sibling modules.
 The pack name reflects the WORK (AI-visibility scoring for local
-businesses), not the deployed brand. Per ADR-045, brand strings
-(e.g. "TruFindAI") do NOT appear in this pack — they belong in a
-separate brand-overlay pack or in deployment-scoped `vertical_copy`
-rows when the platform's identity finalizes.
+businesses). As of B.3.6, this pack ALSO carries deployment-brand
+strings used by the auth flow (subject + body templates under
+`auth.email.sign_in.*` keys in `copy.py`) because the
+local-business-AI-visibility pack is currently TruFindAI's primary
+vertical. If a future deployment uses the same work pack with a
+different brand, ADR-045 anticipates a sibling brand-overlay pack
+under `app/vertical/packs/<brand>_brand_*` carrying just the brand
+strings, with this pack reduced to work-only.
 
 Lifecycle (per ADR-048):
 - B.3.1: stub registered.
-- B.3.2 (this commit): real content from sibling modules.
+- B.3.2: real content from sibling modules (work strings).
 - B.3.3: `vertical_*` tables migrate; seed utility writes pack
   data into DB.
 - B.3.4: engine reads from DB via repositories; this pack module
   remains the canonical SEED for new deployments + tests.
+- B.3.6: auth email subject + body templates moved into this
+  pack's copy (brand-overlay role acknowledged).
 """
 
 from __future__ import annotations

@@ -4,16 +4,21 @@ Per ADR-011 + ADR-046 (locale-keyed) + ADR-048 (seed for
 `vertical_copy`). Keys are dot-namespaced; locales are IETF BCP 47.
 
 B.3.2 ships `'en-US'` only. Future locales add additional entries
-under the same keys; the resolution path in the scoring engine
-selects by `Settings.default_locale` (added in a future commit when
+under the same keys; the resolution path selects by
+`Settings.default_locale` (added in a future commit when
 locale-aware deployments are activated).
 
-Per ADR-045: no `"TruFindAI"` brand strings appear here — this pack
-describes the WORK (local-business AI-visibility scoring), not the
-deployed brand. Brand-overlay strings (subject lines, marketing
-copy) would live in a separate brand-overlay pack or in
-deployment-scoped `vertical_copy` rows when the platform's identity
-finalizes.
+Dual role per phase-b3-plan.md §3:
+- WORK strings (gap descriptions, tier advice, summary template) —
+  describe what local-business AI-visibility scoring produces.
+- BRAND-overlay strings (auth email subject + body, future
+  marketing copy) — the TruFindAI brand. Brand strings live here
+  because the local-business-AI-visibility pack is currently
+  TruFindAI's primary vertical; if a future deployment uses the
+  same work pack with a different brand, a separate
+  brand-overlay pack would carry these strings instead (per
+  ADR-045's anticipated `app/vertical/packs/<brand>_brand_*`
+  pattern).
 """
 
 from __future__ import annotations
@@ -68,4 +73,16 @@ COPY: dict[tuple[str, str], str] = {
     ),
     ("en-US", "summary.gap_count"): "{count} gap(s) identified.",
     ("en-US", "summary.no_gaps"): "No major gaps detected.",
+
+    # --- Auth email templates (B.3.6 — moved from app/domain/auth/issue.py
+    # per ADR-045 + phase-b3-plan.md §9. The brand "TruFindAI" appears
+    # here as a deployed-brand string; a future brand-overlay pack
+    # could supply different values for a different deployment of the
+    # same work pack.)
+    ("en-US", "auth.email.sign_in.subject"): "Your TruFindAI sign-in link",
+    ("en-US", "auth.email.sign_in.body"): (
+        "Click this link to sign in to TruFindAI:\n\n{link}\n\n"
+        "The link expires in {minutes} minutes. If you did not request "
+        "this, you can safely ignore this email."
+    ),
 }
