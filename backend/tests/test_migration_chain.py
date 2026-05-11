@@ -134,9 +134,9 @@ def test_chain_is_linear_and_unbroken() -> None:
     )
 
 
-def test_current_head_is_account_region() -> None:
-    """After B.3.5 the chain head is 0012_account_region (`account.region`
-    column added per ADR-046; informational tag only, no routing)."""
+def test_current_head_is_lead() -> None:
+    """After B.4.1 the chain head is 0013_lead (the customer-owned
+    lead table per ADR-035 + phase-b4-plan.md §4)."""
     migrations = _load_all_migrations()
     revisions = {m.revision for _, m in migrations}
     children: dict[str, list[str]] = {rev: [] for rev in revisions}
@@ -145,13 +145,13 @@ def test_current_head_is_account_region() -> None:
             children[m.down_revision].append(m.revision)
 
     heads = [rev for rev, kids in children.items() if not kids]
-    assert heads == ["0012_account_region"], (
-        f"expected single head 0012_account_region; found {heads}"
+    assert heads == ["0013_lead"], (
+        f"expected single head 0013_lead; found {heads}"
     )
 
 
 def test_expected_revisions_present() -> None:
-    """All revisions through B.3.5 land in this branch."""
+    """All revisions through B.4.1 land in this branch."""
     revisions = {m.revision for _, m in _load_all_migrations()}
     expected = {
         "0001_baseline",
@@ -166,6 +166,7 @@ def test_expected_revisions_present() -> None:
         "0010_vertical_template",
         "0011_vertical_prompt_version",
         "0012_account_region",
+        "0013_lead",
     }
     assert expected.issubset(revisions), (
         f"missing revisions: {expected - revisions}"

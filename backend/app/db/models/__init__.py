@@ -13,6 +13,7 @@ public surface for DB access.
 from __future__ import annotations
 
 from app.db.models.account import Account
+from app.db.models.lead import Lead
 from app.db.models.magic_link_token import MagicLinkToken
 from app.db.models.session import UserSession
 from app.db.models.user import User
@@ -24,6 +25,7 @@ from app.db.models.vertical_template import VerticalTemplate
 
 __all__ = [
     "Account",
+    "Lead",
     "MagicLinkToken",
     "User",
     "UserSession",
