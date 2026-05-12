@@ -118,20 +118,40 @@ def _apply_migrations() -> None:
     command.upgrade(cfg, "head")
 
 
-@pytest.fixture(scope="session")
-def db_engine(_apply_migrations) -> AsyncEngine:
-    """Session-scoped AsyncEngine -- the singleton from
-    `app.db.engine.get_engine()`. Migrations are guaranteed to have
-    run to head (idempotent) before this fixture yields.
+@pytest_asyncio.fixture
+async def db_engine(_apply_migrations) -> AsyncIterator[AsyncEngine]:
+    """Function-scoped AsyncEngine with NullPool. Fresh engine per
+    test so pooled connections never get tied to a dead event loop
+    (pytest-asyncio creates a new loop per function-scoped test;
+    asyncpg sockets bound to a previous loop raise RuntimeError on
+    ping when checked out by the next test).
 
-    Returned engine is reused across all tests in the session. No
-    teardown -- the runtime engine's connection pool gets disposed
-    by Python at interpreter exit; explicit dispose during pytest
-    teardown is unnecessary for our test scale.
+    Distinct from the runtime singleton at `app.db.engine.get_engine()`
+    -- tests must NOT share the production engine because the
+    production pool's connection-reuse strategy conflicts with the
+    per-test loop semantics. NullPool means every `engine.connect()`
+    opens a brand-new asyncpg connection bound to the current loop
+    and closes it on context exit.
+
+    `_apply_migrations` is session-scoped, so the migration upgrade
+    runs exactly once at session start; this engine fixture pays
+    only the per-test cost of opening one fresh connection.
     """
-    from app.db.engine import get_engine
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import NullPool
 
-    return get_engine()
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    assert settings.database_url is not None
+    engine = create_async_engine(
+        settings.database_url,
+        poolclass=NullPool,
+    )
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
 
 
 @pytest_asyncio.fixture
@@ -149,7 +169,8 @@ async def db_session(
     The `after_transaction_end` listener restarts the savepoint
     after each `session.commit()` so the test's code-under-test can
     use commit() naturally; the outer-rollback at teardown ensures
-    no actual durability across tests.
+    no actual durability across tests. The listener is removed at
+    teardown so it doesn't accumulate across tests.
 
     Standard SQLAlchemy + asyncio savepoint pattern; see SQLA docs
     "Joining a Session into an External Transaction".
@@ -162,15 +183,23 @@ async def db_session(
         )
         await connection.begin_nested()
 
-        @event.listens_for(
-            session.sync_session, "after_transaction_end"
-        )
         def _restart_savepoint(sess, trans):  # noqa: ARG001
             if trans.nested and not trans._parent.nested:
                 connection.sync_connection.begin_nested()
 
+        event.listen(
+            session.sync_session,
+            "after_transaction_end",
+            _restart_savepoint,
+        )
+
         try:
             yield session
         finally:
+            event.remove(
+                session.sync_session,
+                "after_transaction_end",
+                _restart_savepoint,
+            )
             await session.close()
             await outer_transaction.rollback()
