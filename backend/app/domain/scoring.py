@@ -6,8 +6,18 @@ summary template) comes from the active vertical pack via
 `app.vertical.registry`. Future commits (B.3.4) swap the runtime
 source from the pack module to `vertical_*` DB rows via repositories;
 the engine signature here does not change.
+
+B.6B.1 refactor (2026-05-12): introduced `run_legacy_scoring()` as
+the single-source-of-truth runner producing both `AnalyzeResponse`
+and the intermediate `SignalResults`. `analyze()` is now a thin
+one-liner over the runner. `_blended_score` math moved into
+`_compute_blended_score`; `_blended_score` itself remains as a
+compatibility shim (per phase-b6b-plan.md §2 decision #8 -- shim
+stays for one phase; remove in B.6C+). Behavior byte-identical
+to pre-B.6B.
 """
 
+from dataclasses import dataclass
 from hashlib import md5
 
 from app.core.config import get_settings
@@ -42,10 +52,28 @@ def _get_pack() -> VerticalPack:
         return get_active_pack(pack_id)
 
 
-def _blended_score(results: list[SignalResult]) -> int:
+def _compute_blended_score(results: list[SignalResult]) -> int:
+    """Legacy blended-score math. Behavior byte-identical to the
+    pre-B.6B `_blended_score` function (which is now a thin shim
+    over this helper -- see below).
+
+    Per phase-b6b-plan.md §4.4: this is the single math seam used
+    by `run_legacy_scoring()` (and by the `_blended_score` shim
+    until B.6C+ retires the shim)."""
     total_weight = sum(r.weight for r in results) or 1.0
     weighted = sum(r.score * r.weight for r in results)
     return round((weighted / total_weight) * 100)
+
+
+def _blended_score(results: list[SignalResult]) -> int:
+    """Compatibility shim. Remove in B.6C after live shadowing
+    stabilizes (per phase-b6b-plan.md §2 decision #8: operational
+    certainty > cleanup purity during production-reach phases).
+
+    Delegates unchanged to `_compute_blended_score`. Existing
+    callers (none today, but the symbol may be imported by future
+    or external code) continue to resolve through this name."""
+    return _compute_blended_score(results)
 
 
 def _resolve_tier(score: int, thresholds: list[tuple[int, str]]) -> str:
@@ -124,15 +152,51 @@ def _generate_competitors(
     return [Competitor(name=n, score=min(100, score + b)) for n, b in zip(names, bumps)]
 
 
-def analyze(business_name: str, location: str, trade: str | None = None) -> AnalyzeResponse:
+@dataclass(frozen=True)
+class LegacyScoringResult:
+    """Combined return value of `run_legacy_scoring`: the
+    user-facing AnalyzeResponse AND the intermediate SignalResults
+    that produced it. Frozen so callers cannot mutate after
+    construction.
+
+    The dual return enables future callers (e.g. B.6B shadow path
+    or B.6C convergence) to share one SIGNAL run between response
+    shaping and downstream consumers without re-running probes.
+    `analyze()` only consumes `.response`.
+
+    Per phase-b6b-plan.md §4.4.
+    """
+
+    response: AnalyzeResponse
+    signal_results: list[SignalResult]
+
+
+def run_legacy_scoring(
+    business_name: str,
+    location: str,
+    trade: str | None = None,
+) -> LegacyScoringResult:
+    """Single-source-of-truth runner for the legacy scoring
+    pipeline. Produces both the user-facing AnalyzeResponse and
+    the intermediate `SignalResults` that fed into it.
+
+    Behavior byte-identical to the pre-B.6B body of `analyze()`.
+    The refactor is purely structural -- the math, the pack
+    resolution, the response shape, and every helper call run in
+    the same order with the same arguments. The only change is
+    that the intermediate `results` list is now ALSO returned.
+
+    Per phase-b6b-plan.md §4.4 + locked decision #8 (refactor
+    creates a seam; no semantic change).
+    """
     pack = _get_pack()
     results = [signal(business_name, location) for signal in SIGNALS]
-    score = _blended_score(results)
+    score = _compute_blended_score(results)
     gaps = [r.gap for r in results if r.gap]
     summary = _build_summary(business_name, score, len(gaps), pack)
     category_scores = _build_category_scores(results, pack)
     competitors = _generate_competitors(business_name, location, score, pack)
-    return AnalyzeResponse(
+    response = AnalyzeResponse(
         score=score,
         gaps=gaps,
         summary=summary,
@@ -140,3 +204,12 @@ def analyze(business_name: str, location: str, trade: str | None = None) -> Anal
         competitors=competitors,
         trade=trade,
     )
+    return LegacyScoringResult(response=response, signal_results=results)
+
+
+def analyze(
+    business_name: str, location: str, trade: str | None = None
+) -> AnalyzeResponse:
+    """Public sync API. Signature + return type byte-identical to
+    pre-B.6B. Thin wrapper over `run_legacy_scoring`."""
+    return run_legacy_scoring(business_name, location, trade).response
