@@ -101,6 +101,15 @@ def _ensure_alembic_version_wide_enough(connection: Connection) -> None:
             ")"
         )
     )
+    # CRITICAL: explicit commit closes the autobegin transaction
+    # triggered by the execute() above. Without this commit,
+    # alembic's own `context.begin_transaction()` would nest inside
+    # an open outer transaction; alembic's migration commits would
+    # become savepoint releases, and the outer transaction would
+    # roll back on connection close -- silently discarding every
+    # CREATE TABLE the migrations ran (CI fix-2 surfaced this
+    # exact failure 2026-05-12).
+    connection.commit()
 
 
 def do_run_migrations(connection: Connection) -> None:
