@@ -23,6 +23,32 @@ jobs:
   backend:
     name: Backend (pytest)
     runs-on: ubuntu-latest
+    # Postgres service added in B.6A.5 -- new test-DB fixtures
+    # (db_engine / db_session in backend/tests/conftest.py) need a
+    # reachable Postgres. The existing mock-only tests do not request
+    # those fixtures and run unaffected. Credentials + image match
+    # infra/dev/docker-compose.yml so local-dev and CI share one
+    # Postgres surface.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: trufindai
+          POSTGRES_PASSWORD: trufindai
+          POSTGRES_DB: trufindai
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trufindai -d trufindai"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Matches backend/app/core/config.py _DEV_DATABASE_URL. Required
+      # only because tests using db_session run `alembic upgrade head`
+      # at session start; mock-only tests would auto-resolve the dev
+      # default. Explicit here to make CI's DB target unambiguous.
+      DATABASE_URL: postgresql+asyncpg://trufindai:trufindai@localhost:5432/trufindai
     steps:
       - uses: actions/checkout@v4
 
