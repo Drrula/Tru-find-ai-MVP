@@ -182,6 +182,22 @@ def test_expected_revisions_present() -> None:
     )
 
 
+def test_revision_strings_fit_widened_alembic_version_column() -> None:
+    """Defensive: alembic's default `alembic_version.version_num` is
+    VARCHAR(32). Our env.py pre-creates the table with VARCHAR(128)
+    to accommodate longer revision identifiers (B.6A.5-fix
+    2026-05-12). This test ensures no migration's revision exceeds
+    the widened limit -- so a future revision authored at 130 chars
+    fails LOUDLY here instead of on the first CI run."""
+    for filename, m in _load_all_migrations():
+        assert len(m.revision) <= 128, (
+            f"{filename}: revision string {m.revision!r} is "
+            f"{len(m.revision)} chars; env.py widens "
+            f"alembic_version.version_num to 128 -- this revision "
+            f"exceeds even the widened limit. Shorten the slug."
+        )
+
+
 def test_alembic_env_imports_models_package() -> None:
     """env.py must `from app.db.models import *` so target_metadata sees
     User, UserSession, MagicLinkToken (added in B.2.2) without manual edit."""

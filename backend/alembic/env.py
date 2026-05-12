@@ -10,6 +10,14 @@ Models live under `app.db.models.*` and inherit from `app.db.base.Base`.
 The package may be empty at any given commit (B.1.3: empty; B.1.4+:
 models registered as they're added). `target_metadata = Base.metadata`
 sees whatever models have been imported by the time alembic runs.
+
+B.6A.5-fix (2026-05-12): pre-create `alembic_version` with
+VARCHAR(128) on fresh DBs. Alembic's default schema is VARCHAR(32);
+some of our revision identifiers exceed that
+(`0006_magic_link_token_email_encrypted` is 38 chars,
+`0020_seed_demo_account_vertical_catalog` is 39 chars). The pre-flight
+runs before alembic's own table bootstrap so alembic finds an
+existing table and skips its (too-narrow) CREATE TABLE.
 """
 
 from __future__ import annotations
@@ -17,6 +25,7 @@ from __future__ import annotations
 import asyncio
 from logging.config import fileConfig
 
+import sqlalchemy as sa
 from alembic import context
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
@@ -58,6 +67,42 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _ensure_alembic_version_wide_enough(connection: Connection) -> None:
+    """Pre-create `alembic_version` with VARCHAR(128) on fresh DBs.
+
+    Alembic's default `alembic_version.version_num` is `VARCHAR(32)`,
+    which is too narrow for some revision identifiers in this
+    codebase (`0006_magic_link_token_email_encrypted` = 38 chars,
+    `0020_seed_demo_account_vertical_catalog` = 39 chars). Alembic
+    uses "create only if it doesn't exist" semantics for the version
+    table; if we pre-create it with a wider column, alembic skips
+    its own creation and uses our schema.
+
+    Idempotent: no-op if `alembic_version` already exists. Does NOT
+    auto-ALTER a too-narrow existing column -- that's a manual
+    operator step for any dev DB that ran migrations against the
+    pre-fix VARCHAR(32) column:
+
+        ALTER TABLE alembic_version
+        ALTER COLUMN version_num TYPE VARCHAR(128);
+
+    Fresh DBs (including CI's Postgres service) hit this code path
+    BEFORE alembic's own bootstrap, so they get VARCHAR(128) from
+    the start.
+    """
+    inspector = sa.inspect(connection)
+    if inspector.has_table("alembic_version"):
+        return
+    connection.execute(
+        sa.text(
+            "CREATE TABLE alembic_version ("
+            "version_num VARCHAR(128) NOT NULL, "
+            "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)"
+            ")"
+        )
+    )
+
+
 def do_run_migrations(connection: Connection) -> None:
     context.configure(
         connection=connection,
@@ -77,6 +122,9 @@ async def run_migrations_online() -> None:
         prefix="sqlalchemy.",
     )
     async with connectable.connect() as connection:
+        # Pre-flight: ensure alembic_version is wide enough BEFORE
+        # alembic's own table bootstrap (see helper docstring).
+        await connection.run_sync(_ensure_alembic_version_wide_enough)
         await connection.run_sync(do_run_migrations)
     await connectable.dispose()
 
