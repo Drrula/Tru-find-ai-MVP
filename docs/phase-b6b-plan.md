@@ -652,3 +652,110 @@ the shim ensures this is rare).
 - `feedback_phase_gating.md`
 - `feedback_logical_modularity_first.md`
 - `feedback_powershell_safer_commands.md`
+
+---
+
+## §13 Future guardrails / post-B.6B requirements
+
+Captured 2026-05-12, BEFORE B.6B.3 lands. These four items are
+**explicit deferred requirements** — gates / disciplines that
+must be addressed before specific expansion milestones, but are
+NOT part of B.6B.3 implementation and do not block its commit /
+push / CI cycle. Recorded here so future phases pick them up
+without re-discovery.
+
+### §13.1 External API cost guardrail (gate for any paid-API enablement)
+
+Before any large-scale enablement of Google Places, Google
+Maps, SERP APIs, scraping, screenshot capture, enrichment, or
+monitoring automation, build a centralized cost safety layer.
+
+Requirements:
+- Provider kill switches (per-provider on/off)
+- Hard caps: daily + monthly per provider
+- Per-scan cost limits (no single scan exceeds $N)
+- Per-customer / per-account limits
+- Cache-first enforcement (no provider call if cache hit)
+- Retry limits with exponential-backoff ceilings
+- "Block-before-provider-call" tests: a paid call cannot
+  happen unless the guard layer explicitly allows it
+- Structured logs per ADR-030 convention:
+  - `cost_guard.allowed`
+  - `cost_guard.blocked`
+  - `cost_guard.cache_hit`
+  - `cost_guard.budget_exceeded`
+  - `cost_guard.kill_switch_active`
+
+**Principle: paid external API calls must FAIL CLOSED, not
+surprise-bill the business.** Default state when any cap is
+hit or any kill switch is on is "no provider call." Operators
+must explicitly opt back in.
+
+### §13.2 Shadow runtime observability (gate for broad shadow enablement)
+
+Before broad production shadow enablement beyond the canary
+sequence (per §8 rollout gates), add or operator-confirm the
+following metrics in production:
+
+- Connection pool baseline (active / idle / wait time)
+- Shadow task execution count (per minute)
+- Timeout rate (`bridge.shadow_timeout` / total scheduled)
+- Failure rate (`bridge.shadow_failed` / total scheduled)
+- Rollback failure rate (`bridge.shadow_rollback_failed`)
+- Response latency baseline (flag-OFF vs flag-ON; assert no
+  measurable difference)
+- Flag-state visibility (current `B6B_SHADOW_SCORING_ENABLED`
+  value queryable from a health endpoint or log)
+
+This is operator infrastructure work, NOT additional B.6B
+code scope.
+
+### §13.3 Replay / historical analysis discipline
+
+Persisted analyses must remain replayable for future
+convergence validation, score-drift tracking, and
+investor-grade proof. Each persisted unit must carry:
+
+- Input payload (`business_name`, `location`, `trade`)
+- Timestamps (`computed_at` + `recorded_at`)
+- Scoring / source version (`BRIDGE_LEAD_SOURCE`, currently
+  `bridge:legacy_analyzer:v1`; future variants get `:v2` /
+  `:v3` without rename)
+- Signal outputs (`lead_signal.value` JSONB carries `score` +
+  `gap` + `weight_at_probe` per the locked option-2 shape
+  from B.6A.2)
+- Bridge / canonical path metadata (`vertical_id` +
+  `weight_version_at` on the snapshot; replay-safe per
+  ADR-010, already validated by B.6A.6's exact-equality
+  replay test)
+
+The B.6A.4 orchestrator + B.6A.6 replay tests already satisfy
+this for the demo path. Post-B.6B work introducing new data
+sources (real Google Places, real enrichment, etc.) must
+preserve this discipline: each new source gets its own
+versioned `BRIDGE_LEAD_SOURCE` string + its raw inputs
+persist into `lead_signal.value`.
+
+### §13.4 AI signal discovery dataset (product / strategic)
+
+Create a future sales / research workflow to identify
+businesses that dominate offline (high real-world reputation,
+high revenue, strong physical presence) but have weak
+AI-visible authority signals.
+
+Strategic purpose: this becomes a major proof asset for
+TruFindAI's AI Authority Infrastructure framing (per
+`project_platform_directive_v2_authority_infrastructure.md`).
+The narrative is "elite businesses can still be misunderstood
+or under-recommended by AI systems" — and TruFindAI's
+canonical scoring + AI-visibility audit is the corrective.
+
+Not B.6B code scope. A future product / sales workflow that
+may become its own phase.
+
+---
+
+**These four items are NOT part of B.6B.3 implementation and
+do not block the B.6B.3 commit / push / CI cycle.** They are
+captured for the record as load-bearing future requirements
+that should inform B.6C+ planning.

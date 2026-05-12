@@ -20,10 +20,10 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import BackgroundTasks, FastAPI
 
 from app.api.v1 import api_router
-from app.api.v1.analyses_legacy import run_analysis
+from app.api.v1.analyses_legacy import _schedule_shadow, run_analysis
 from app.core.config import get_settings
 from app.core.errors import register_error_handlers
 from app.core.events import publish_event
@@ -91,8 +91,15 @@ def create_app() -> FastAPI:
         response_model=AnalyzeResponse,
         include_in_schema=False,
     )
-    def analyze_business_legacy(payload: AnalyzeRequest) -> AnalyzeResponse:
-        return run_analysis(payload)
+    def analyze_business_legacy(
+        payload: AnalyzeRequest,
+        background_tasks: BackgroundTasks,
+    ) -> AnalyzeResponse:
+        # B.6B.3: same shadow scheduling as /v1/analyses-legacy.
+        # Response shape unchanged; shadow gated by feature flag.
+        response = run_analysis(payload)
+        _schedule_shadow(background_tasks, payload)
+        return response
 
     log = get_logger("app.main")
     log.info("app_initialized", env=settings.app_env)

@@ -155,6 +155,28 @@ async def db_engine(_apply_migrations) -> AsyncIterator[AsyncEngine]:
 
 
 @pytest_asyncio.fixture
+async def async_client() -> AsyncIterator:
+    """httpx.AsyncClient bound to the FastAPI app via ASGITransport.
+
+    Async-native -- runs the entire ASGI lifecycle (including
+    BackgroundTasks) inside the calling test's event loop, so
+    asyncpg connections stay loop-bound. Use this for B.6B.3
+    HTTP integration tests instead of the sync TestClient, which
+    spawns its own AnyIO portal and corrupts loop binding.
+    """
+    pytest.importorskip("httpx")
+    from httpx import ASGITransport, AsyncClient
+
+    from app.main import app
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test"
+    ) as client:
+        yield client
+
+
+@pytest_asyncio.fixture
 async def db_session(
     db_engine: AsyncEngine,
 ) -> AsyncIterator[AsyncSession]:
@@ -203,3 +225,88 @@ async def db_session(
             )
             await session.close()
             await outer_transaction.rollback()
+
+
+# ---------------------------------------------------------------------------
+# B.6B.3: shadow-path fixtures (opt-in)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def b6b_flag_on(monkeypatch):
+    """Patch `bridge_shadow.get_settings` so the shadow flag reads
+    True for this test. Mirrors the pattern from
+    test_bridge_shadow.py but at the conftest level so HTTP route
+    tests can opt in by listing the fixture."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "app.domain.bridge_shadow.get_settings",
+        lambda: SimpleNamespace(b6b_shadow_scoring_enabled=True),
+    )
+
+
+@pytest.fixture
+def b6b_flag_off(monkeypatch):
+    """Explicit OFF override (also the default in every env).
+    Listing this fixture documents the test's flag assumption."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "app.domain.bridge_shadow.get_settings",
+        lambda: SimpleNamespace(b6b_shadow_scoring_enabled=False),
+    )
+
+
+@pytest.fixture
+def shadow_orchestrator_mock(monkeypatch):
+    """Patch `analyze_and_persist` at the bridge_shadow import path.
+
+    Returns the AsyncMock so route-level tests can configure
+    side_effect / return_value and assert call shapes. Mocking at
+    the orchestrator boundary keeps route tests isolated from
+    the B.6A.4 implementation (which is exhaustively tested in
+    test_analyze_and_persist.py and end-to-end in
+    test_bridge_corpus.py).
+    """
+    from unittest.mock import AsyncMock
+
+    mock = AsyncMock(name="analyze_and_persist_mock")
+    monkeypatch.setattr(
+        "app.domain.bridge_shadow.analyze_and_persist", mock
+    )
+    return mock
+
+
+@pytest_asyncio.fixture
+async def shadow_session_capture(
+    db_session: AsyncSession, monkeypatch
+):
+    """Override `_get_sessionmaker` so the shadow path's OWN
+    session is bound to the SAME connection as `db_session`,
+    using `join_transaction_mode="create_savepoint"`. Shadow
+    writes inherit the test's outer-transaction rollback
+    discipline at fixture teardown.
+
+    Used by the small set of B.6B.3 tests that exercise the real
+    orchestrator end-to-end through the HTTP route (most route
+    tests mock at the orchestrator boundary via
+    `shadow_orchestrator_mock` instead -- faster + simpler).
+    """
+    test_connection = db_session.bind
+
+    class _SavepointBoundFactory:
+        def __call__(self) -> AsyncSession:
+            return AsyncSession(
+                bind=test_connection,
+                expire_on_commit=False,
+                join_transaction_mode="create_savepoint",
+            )
+
+    factory_instance = _SavepointBoundFactory()
+
+    monkeypatch.setattr(
+        "app.domain.bridge_shadow._get_sessionmaker",
+        lambda: factory_instance,
+    )
+    yield factory_instance
