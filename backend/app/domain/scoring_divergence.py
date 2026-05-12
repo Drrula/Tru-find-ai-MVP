@@ -9,17 +9,17 @@ with row-by-row signal- and weight-provenance attribution. The
 highest-value B.6A outcome is NOT "the bridge exists"; it is
 "we can confidently explain the bridge's behavior."
 
-B.6A.3 SCOPE (narrowest safe):
+B.6A.3 scope (now part of B.6A surface):
   - Two frozen dataclasses: SignalContributionDiff, ScoreDivergence
   - One tolerance constant: BRIDGE_DIVERGENCE_TOLERANCE
   - Two pure functions: compute_divergence, explain_divergence
 
-DEFERRED TO B.6A.4 (alongside the orchestrator that calls them):
-  - log_divergence -- structured-log emitter (structlog wiring
-    decision lives at the call site, not here)
-  - to_log_dict -- JSON-serializable rendering (deferred until
-    log_divergence needs it)
-  - Any caller / integration / public-API exposure
+B.6A.4 addition (landed alongside the orchestrator):
+  - log_divergence: structured-log emitter (structlog-style logger
+    injected; no module default)
+
+Still deferred:
+  - to_log_dict / public API re-export -- not needed yet
 
 PURE. No DB, no I/O, no clock, no globals mutated. No async. The
 comparator can be unit-tested in isolation against handcrafted
@@ -316,3 +316,81 @@ def explain_divergence(divergence: ScoreDivergence) -> str:
             f"delta={delta_str}"
         )
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# log_divergence (B.6A.4 -- structured-log emitter)
+# ---------------------------------------------------------------------------
+
+
+#: Canonical event name for the structured log line emitted on every
+#: bridge call. Per ADR-030 + the explainability-first directive:
+#: this is the single grep target for finding ALL divergence
+#: events across deployments.
+BRIDGE_DIVERGENCE_EVENT: str = "bridge.score_comparison"
+
+
+def _divergence_to_log_payload(
+    divergence: ScoreDivergence,
+) -> dict[str, Any]:
+    """Render a ScoreDivergence into a JSON-safe dict for the
+    structured-log emitter.
+
+    Decimals -> str (preserve precision, JSON-encodable).
+    UUIDs -> str (only if present).
+    datetime -> ISO 8601 str (only if present).
+    """
+    payload: dict[str, Any] = {
+        "legacy_score": divergence.legacy_score,
+        "canonical_score": str(divergence.canonical_score),
+        "delta": divergence.delta,
+        "within_tolerance": divergence.within_tolerance,
+        "tolerance": BRIDGE_DIVERGENCE_TOLERANCE,
+        "signal_breakdown": [
+            {
+                "signal_name": d.signal_name,
+                "legacy_score": str(d.legacy_score),
+                "canonical_score": str(d.canonical_score),
+                "legacy_weight": str(d.legacy_weight),
+                "canonical_weight": str(d.canonical_weight),
+                "legacy_contribution": str(d.legacy_contribution),
+                "canonical_contribution": str(d.canonical_contribution),
+                "contribution_delta": str(d.contribution_delta),
+            }
+            for d in divergence.signal_breakdown
+        ],
+    }
+    if divergence.vertical_id is not None:
+        payload["vertical_id"] = str(divergence.vertical_id)
+    if divergence.weight_version_at is not None:
+        payload["weight_version_at"] = divergence.weight_version_at.isoformat()
+    if divergence.lead_id is not None:
+        payload["lead_id"] = str(divergence.lead_id)
+    if divergence.snapshot_id is not None:
+        payload["snapshot_id"] = str(divergence.snapshot_id)
+    return payload
+
+
+def log_divergence(divergence: ScoreDivergence, logger: Any) -> None:
+    """Emit `bridge.score_comparison` at appropriate severity.
+
+    Severity ladder (per docs/phase-b6a-plan.md §4.3):
+      DEBUG  if delta == 0           -- bridge agrees exactly
+      INFO   if within_tolerance     -- boundary-case rounding
+      ERROR  if outside tolerance    -- real drift, investigate
+
+    Logger is injected (no module default) so callers bind their
+    own context (request_id, account_id, etc.) before calling.
+    Tests pass a `MagicMock()` and assert the call shape.
+
+    Pure side effect on the logger; returns None. The logger is
+    expected to follow the structlog API:
+    `logger.info(event_name, **fields)`.
+    """
+    payload = _divergence_to_log_payload(divergence)
+    if divergence.delta == 0:
+        logger.debug(BRIDGE_DIVERGENCE_EVENT, **payload)
+    elif divergence.within_tolerance:
+        logger.info(BRIDGE_DIVERGENCE_EVENT, **payload)
+    else:
+        logger.error(BRIDGE_DIVERGENCE_EVENT, **payload)

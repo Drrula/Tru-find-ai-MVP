@@ -25,12 +25,16 @@ import pytest
 
 from app.db.models import VerticalLeadSignalWeight
 from app.domain.leads.scoring import ComputedLeadScore
+from unittest.mock import MagicMock
+
 from app.domain.scoring_divergence import (
+    BRIDGE_DIVERGENCE_EVENT,
     BRIDGE_DIVERGENCE_TOLERANCE,
     ScoreDivergence,
     SignalContributionDiff,
     compute_divergence,
     explain_divergence,
+    log_divergence,
 )
 from app.domain.signals import SignalResult
 
@@ -554,3 +558,158 @@ def test_explain_omits_optional_ids_when_none() -> None:
     rendered = explain_divergence(div)
     assert "lead_id" not in rendered
     assert "snapshot_id" not in rendered
+
+
+# ---------------------------------------------------------------------------
+# log_divergence (B.6A.4)
+# ---------------------------------------------------------------------------
+
+
+def _div_at_delta(delta: int) -> ScoreDivergence:
+    """Build a minimal ScoreDivergence with the requested delta."""
+    return compute_divergence(
+        legacy_score=60 + delta,
+        legacy_results=[],
+        canonical_computed=_computed("60.00"),
+        canonical_weights=[],
+    )
+
+
+def test_log_divergence_emits_debug_when_delta_zero() -> None:
+    logger = MagicMock()
+    div = _div_at_delta(0)
+    log_divergence(div, logger)
+    logger.debug.assert_called_once()
+    logger.info.assert_not_called()
+    logger.error.assert_not_called()
+
+
+def test_log_divergence_emits_info_at_tolerance_boundary_plus_one() -> None:
+    logger = MagicMock()
+    div = _div_at_delta(1)
+    log_divergence(div, logger)
+    logger.info.assert_called_once()
+    logger.debug.assert_not_called()
+    logger.error.assert_not_called()
+
+
+def test_log_divergence_emits_info_at_tolerance_boundary_minus_one() -> None:
+    logger = MagicMock()
+    div = _div_at_delta(-1)
+    log_divergence(div, logger)
+    logger.info.assert_called_once()
+    logger.debug.assert_not_called()
+    logger.error.assert_not_called()
+
+
+def test_log_divergence_emits_error_when_outside_tolerance() -> None:
+    logger = MagicMock()
+    div = _div_at_delta(5)
+    log_divergence(div, logger)
+    logger.error.assert_called_once()
+    logger.debug.assert_not_called()
+    logger.info.assert_not_called()
+
+
+def test_log_divergence_uses_canonical_event_name() -> None:
+    """Every bridge log line carries the same `event` name so a single
+    grep finds all divergence emissions across deployments."""
+    logger = MagicMock()
+    log_divergence(_div_at_delta(0), logger)
+    args, _kwargs = logger.debug.call_args
+    assert args[0] == BRIDGE_DIVERGENCE_EVENT
+    assert BRIDGE_DIVERGENCE_EVENT == "bridge.score_comparison"
+
+
+def test_log_divergence_payload_has_required_keys() -> None:
+    logger = MagicMock()
+    div = _div_at_delta(0)
+    log_divergence(div, logger)
+    _args, kwargs = logger.debug.call_args
+    required = {
+        "legacy_score",
+        "canonical_score",
+        "delta",
+        "within_tolerance",
+        "tolerance",
+        "signal_breakdown",
+    }
+    assert required.issubset(kwargs.keys())
+
+
+def test_log_divergence_payload_serializes_decimals_as_strings() -> None:
+    """JSONB-safety: canonical_score and per-signal Decimals must be
+    string-typed in the payload so structlog's JSON renderer cannot
+    silently coerce them."""
+    logger = MagicMock()
+    vertical_id = uuid4()
+    legacy = [SignalResult(name="x", score=0.5, weight=0.2, gap=None)]
+    canonical_weights = [_canonical_weight(vertical_id, "x", "0.200")]
+    contributions = [_canonical_contrib("x", "0.5", "0.200")]
+    div = compute_divergence(
+        legacy_score=50,
+        legacy_results=legacy,
+        canonical_computed=_computed("50.00", contributions),
+        canonical_weights=canonical_weights,
+        vertical_id=vertical_id,
+    )
+    log_divergence(div, logger)
+    _args, kwargs = logger.debug.call_args
+    assert isinstance(kwargs["canonical_score"], str)
+    assert kwargs["canonical_score"] == "50.00"
+    for entry in kwargs["signal_breakdown"]:
+        for k in (
+            "legacy_score",
+            "canonical_score",
+            "legacy_weight",
+            "canonical_weight",
+            "legacy_contribution",
+            "canonical_contribution",
+            "contribution_delta",
+        ):
+            assert isinstance(entry[k], str), f"{k!r} should be str-typed"
+
+
+def test_log_divergence_payload_serializes_uuids_and_datetimes() -> None:
+    logger = MagicMock()
+    vertical_id = uuid4()
+    lead_id = uuid4()
+    snapshot_id = uuid4()
+    wv_at = datetime(2026, 5, 11, 12, 0, tzinfo=timezone.utc)
+    div = compute_divergence(
+        legacy_score=60,
+        legacy_results=[],
+        canonical_computed=_computed("60.00"),
+        canonical_weights=[],
+        vertical_id=vertical_id,
+        weight_version_at=wv_at,
+        lead_id=lead_id,
+        snapshot_id=snapshot_id,
+    )
+    log_divergence(div, logger)
+    _args, kwargs = logger.debug.call_args
+    assert kwargs["vertical_id"] == str(vertical_id)
+    assert kwargs["lead_id"] == str(lead_id)
+    assert kwargs["snapshot_id"] == str(snapshot_id)
+    assert kwargs["weight_version_at"] == wv_at.isoformat()
+
+
+def test_log_divergence_omits_optional_fields_when_none() -> None:
+    logger = MagicMock()
+    div = _div_at_delta(0)  # no optional ids set
+    log_divergence(div, logger)
+    _args, kwargs = logger.debug.call_args
+    # These optional fields must NOT appear when their source was None.
+    assert "vertical_id" not in kwargs
+    assert "weight_version_at" not in kwargs
+    assert "lead_id" not in kwargs
+    assert "snapshot_id" not in kwargs
+
+
+def test_log_divergence_no_module_default_logger() -> None:
+    """The function MUST require an explicit logger param. A test
+    that omits it should fail at call time, not silently emit to
+    some module-level default."""
+    div = _div_at_delta(0)
+    with pytest.raises(TypeError):
+        log_divergence(div)  # type: ignore[call-arg]
