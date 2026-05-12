@@ -134,10 +134,10 @@ def test_chain_is_linear_and_unbroken() -> None:
     )
 
 
-def test_current_head_is_lead_score_snapshot() -> None:
-    """After B.5.1 the chain head is 0019_lead_score_snapshot
-    (append-only score time-series substrate per ADR-010 +
-    phase-b5-plan.md §5)."""
+def test_current_head_is_seed_demo_account_vertical_catalog() -> None:
+    """After B.6A.1 the chain head is
+    0020_seed_demo_account_vertical_catalog (first seed-data
+    migration in the codebase per phase-b6a-plan.md §5.1)."""
     migrations = _load_all_migrations()
     revisions = {m.revision for _, m in migrations}
     children: dict[str, list[str]] = {rev: [] for rev in revisions}
@@ -146,13 +146,14 @@ def test_current_head_is_lead_score_snapshot() -> None:
             children[m.down_revision].append(m.revision)
 
     heads = [rev for rev, kids in children.items() if not kids]
-    assert heads == ["0019_lead_score_snapshot"], (
-        f"expected single head 0019_lead_score_snapshot; found {heads}"
+    assert heads == ["0020_seed_demo_account_vertical_catalog"], (
+        f"expected single head 0020_seed_demo_account_vertical_catalog; "
+        f"found {heads}"
     )
 
 
 def test_expected_revisions_present() -> None:
-    """All revisions through B.5.1 land in this branch."""
+    """All revisions through B.6A.1 land in this branch."""
     revisions = {m.revision for _, m in _load_all_migrations()}
     expected = {
         "0001_baseline",
@@ -174,6 +175,7 @@ def test_expected_revisions_present() -> None:
         "0017_lead_signal",
         "0018_vertical_lead_signal_weight",
         "0019_lead_score_snapshot",
+        "0020_seed_demo_account_vertical_catalog",
     }
     assert expected.issubset(revisions), (
         f"missing revisions: {expected - revisions}"
