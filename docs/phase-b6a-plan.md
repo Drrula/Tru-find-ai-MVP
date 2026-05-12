@@ -366,19 +366,23 @@ Seeds:
 
 ## §6 Sub-phase breakdown
 
-Six commits after this plan doc. Each commit is independently
-revertable. Smoke-test-first, verify-before-commit, stop between.
+Seven commits after this plan doc (renumbered 2026-05-11 -- audit
+during B.6A.4-completion surfaced that the codebase has no real-DB
+test fixtures, so the originally-singular B.6A.5 split into B.6A.5
+infra + B.6A.6 corpus). Each commit is independently revertable.
+Smoke-test-first, verify-before-commit, stop between.
 
 | Sub-phase | Scope | Smoke gate |
 |---|---|---|
 | **B.6A.0** | This plan doc | doc renders; references resolve |
 | **B.6A.1** | Migration 0020 (seed only) + verification tests | alembic upgrade+downgrade clean; demo rows queryable + assertable; existing 600 backend tests + new verification tests all green |
 | **B.6A.2** | `signal_results_to_observations` + unit tests | new tests pass; existing suite green |
-| **B.6A.3** | Divergence comparator + log helper + unit tests | dataclass round-trip tests pass; existing suite green |
-| **B.6A.4** | `analyze_and_persist` orchestrator + integration tests | orchestrator round-trip writes Lead + 4 LeadSignals + 1 LeadScoreSnapshot in one transaction; existing suite green |
-| **B.6A.5** | Test corpus (50 synthetic inputs across 4 signal ranges + "Joe Pizza, Brooklyn, NY" baseline) + replay test | all corpus assertions pass within TOLERANCE=1; replay test passes (snapshot recomputes to identical score) |
+| **B.6A.3** | Divergence comparator + `explain_divergence` (NO log emitter; deferred to B.6A.4) + unit tests | dataclass round-trip tests pass; existing suite green |
+| **B.6A.4** | `analyze_and_persist` orchestrator + `log_divergence` emitter + mock-heavy tests | orchestrator round-trip mock-stages Lead + 4 LeadSignals + 1 LeadScoreSnapshot; all-or-nothing aborts on partial failure; existing suite green |
+| **B.6A.5** | Real-DB test infrastructure (shared dev DB + nested-savepoint rollback) + CI Postgres service + self-tests | fixtures land; new `db_session`-using self-tests green locally; CI workflow yaml parses; existing mock-only suite passes untouched |
+| **B.6A.6** | Corpus (10-15 inputs covering signal-score ranges + "Joe Pizza, Brooklyn, NY" baseline) + replay test against real DB | all corpus assertions pass within TOLERANCE=1; replay delta == 0 (exact, no tolerance); bridge-source grep matches corpus size |
 
-Phase closure summary (no code commit) after B.6A.5: verification
+Phase closure summary (no code commit) after B.6A.6: verification
 pass, update memory with B.6A-complete + B.6B-pending status.
 
 ---
@@ -388,7 +392,7 @@ pass, update memory with B.6A-complete + B.6B-pending status.
 Per Andrew's directive: "the highest-value outcome is not 'the bridge
 exists' — it is 'we can confidently explain WHY the two systems agree
 or disagree.'" This section drives B.6A.3 and is referenced by
-B.6A.4 and B.6A.5.
+B.6A.4 and B.6A.6.
 
 ### §7.1 What must be answerable
 
@@ -467,8 +471,20 @@ All six are surfaced by `ScoreDivergence` + `SignalContributionDiff`.
 ### §8.4 Baseline preservation
 
 The existing baseline `analyze('Joe Pizza','Brooklyn, NY').score == 60`
-MUST remain green throughout all 6 sub-phases. The bridge is dark
+MUST remain green throughout all 7 sub-phases. The bridge is dark
 code; it cannot affect this assertion.
+
+### §8.5 Partial-catalog mutation test (deferred)
+
+The plan §8.3 mentioned a "drop one weight row mid-test, call
+orchestrator, assert canonical excludes that signal" test. Per
+the audit decision 2026-05-11, this test is DEFERRED out of B.6A.6
+scope. Rationale: it requires mid-test mutation of seeded data,
+which adds DB-fixture complexity beyond the narrowest-safe corpus.
+The unobserved-signal code path is already covered by unit tests
+in `test_scoring_divergence.py::
+test_unobserved_canonical_signal_shows_weight_but_zero_score`.
+Reconsider in B.6B if real partial-catalog drift surfaces.
 
 ---
 
@@ -494,22 +510,33 @@ Each item is one or more B.6B sub-phases. None are in B.6A scope.
 
 ## §10 Rollback story
 
-B.6A is fully dark code with one seed migration:
+B.6A is fully dark code with one seed migration and one CI yaml
+change. Rollback paths per sub-phase:
 
-- Code-only revert (B.6A.2 → B.6A.5): `git revert` removes the new
-  files. No production path depends on them. Tests are additive.
-  Migration is unaffected.
-- Migration revert: `alembic downgrade -1` drops the seed rows
-  (0020 downgrade) — demo account + demo vertical + 4 signal
+- **B.6A.2 -> B.6A.4** (orchestrator + adapter + comparator): `git
+  revert` removes the new files. No production path depends on
+  them. Tests are additive. Migration is unaffected.
+- **B.6A.5** (real-DB fixtures + CI Postgres service): `git revert`
+  reverts the conftest additions, removes `test_db_fixtures.py`,
+  reverts the `.github/workflows/ci.yml` modification (Postgres
+  service block + DATABASE_URL env). No production-code change to
+  revert; the next CI run after the revert returns to the pre-B.6A.5
+  pytest job shape.
+- **B.6A.6** (corpus + replay tests): `git revert` removes
+  `test_bridge_corpus.py`. No production-code or fixture-shape
+  change to revert.
+- **Migration revert**: `alembic downgrade -1` drops the seed rows
+  (0020 downgrade) -- demo account + demo vertical + 4 signal
   definitions + 4 lead weight rows. Existing vertical/account/lead
   rows are untouched (the demo account is the only account row
   this migration touches, and its UUID5 derivation makes its
   identity unambiguous).
-- Full phase revert: code revert + alembic downgrade -1. Repo
-  returns to `1b303ab`-equivalent state (B.6A.0 plan doc still
-  present, no schema or data change applied).
+- **Full phase revert**: revert B.6A.6 -> B.6A.5 -> B.6A.4 ->
+  B.6A.3 -> B.6A.2 -> B.6A.1 code, then `alembic downgrade -1`.
+  Repo returns to `1b303ab`-equivalent state (B.6A.0 plan doc
+  still present, no schema/data/test-fixture change applied).
 
-If B.6A.5 corpus tests reveal unfixable divergence: the bridge
+If B.6A.6 corpus tests reveal unfixable divergence: the bridge
 stays as latent infrastructure; B.6B is blocked until the
 divergence is understood. No prod path was touched, so nothing
 breaks; only the convergence plan is paused.
