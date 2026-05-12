@@ -94,6 +94,17 @@ class Settings(BaseSettings):
     llm_model: str | None = Field(default=None)
     google_places_api_key: str | None = Field(default=None)
 
+    # --- B.6B: live shadow persistence feature flag.
+    # Per docs/phase-b6b-plan.md §2 decision #3 + §6 flag-OFF
+    # invariant. When False (default in every environment), the
+    # canonical persistence bridge is fully dark -- no orchestrator
+    # execution, no DB writes, no log emissions, byte-identical
+    # responses. When True, requests trigger a post-response
+    # shadow execution via FastAPI BackgroundTasks (wired in
+    # B.6B.3). Legacy `analyze()` remains the SOLE source of
+    # response shaping under any flag state.
+    b6b_shadow_scoring_enabled: bool = Field(default=False)
+
     @model_validator(mode="after")
     def _resolve_secrets(self) -> "Settings":
         """Apply dev defaults; require explicit values in staging / production.
