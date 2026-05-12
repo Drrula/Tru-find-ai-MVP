@@ -43,14 +43,22 @@ orchestrator, not afterthought.
    - Bridge writes go to a single deterministic account row;
      real-account semantics deferred to a later phase.
 
-2. **Vertical resolution:** add `pack_id` (text, nullable) column on
-   `vertical` table.
-   - Canonical stack wants UUID-backed identity; name resolution is
-     fragile and becomes technical debt.
-   - Smallest clean normalization step; explicit resolver, no
-     "magic by name" conventions.
-   - Do NOT generalize beyond what B.6A needs (no pack registry
-     refactor, no vertical lifecycle change).
+2. **Vertical resolution:** use the existing `vertical.pack_id`
+   column (NOT NULL + UNIQUE).
+   - **Audit correction (2026-05-11):** `vertical.pack_id` already
+     exists with stricter constraints than the original plan
+     proposed — added in migration 0007 (B.3.3) as `NOT NULL` with
+     a full `UniqueConstraint` (see `backend/app/db/models/vertical.py:43-46`
+     and `backend/alembic/versions/0007_vertical.py:38,53`). **No
+     schema migration needed for B.6A.**
+   - Canonical stack resolves `vertical_id` from `pack_id` via the
+     existing column. The demo vertical row is seeded in
+     migration 0020 with
+     `pack_id = settings.default_vertical_pack_id`
+     (currently `"local_business_ai_visibility"`).
+   - Explicit resolver; no "magic by name" conventions. Do NOT
+     generalize beyond what B.6A needs (no pack registry refactor,
+     no vertical lifecycle change).
 
 3. **Lead identity per call:** lead-per-call.
    - Dedupe semantics were intentionally deferred in B.4
@@ -94,6 +102,11 @@ Explicitly NOT in B.6A:
 - Background recompute jobs.
 - Property-based testing (deferred; corpus-based tests sufficient).
 - Removing or renaming `_blended_score` (retirement is B.6B).
+- Population of `LEAD_SIGNAL_WEIGHTS` in the legacy pack at
+  `backend/app/vertical/packs/local_business_ai_visibility/lead_signal_weights.py`.
+  Per audit decision (2026-05-11), the seed migration is the sole
+  B.6A source of truth for canonical lead-scoring weights; the
+  pack's dict stays empty. B.6B may converge sources.
 
 ---
 
@@ -104,13 +117,13 @@ Explicitly NOT in B.6A:
 ```
 backend/
   alembic/versions/
-    0020_add_pack_id_to_vertical.py        # B.6A.1
-    0021_seed_demo_account_vertical_catalog.py   # B.6A.1
+    0020_seed_demo_account_vertical_catalog.py   # B.6A.1
   app/domain/
     scoring_persistence.py                 # B.6A.2 (adapter)
                                            # B.6A.4 (orchestrator)
     scoring_divergence.py                  # B.6A.3 (comparator + log)
   tests/
+    test_seed_0020.py                      # B.6A.1 (verification)
     test_signal_adapter.py                 # B.6A.2
     test_scoring_divergence.py             # B.6A.3
     test_analyze_and_persist.py            # B.6A.4
@@ -254,65 +267,97 @@ No HTTP wiring. Not called from any prod path in B.6A.
 
 ## §5 Schema changes
 
-### §5.1 Migration 0020: add `pack_id` column on `vertical`
+### §5.1 Migration 0020: seed demo account + vertical + catalog
 
-- Add `pack_id text NULL`.
-- Backfill existing `vertical` rows (if any) to
-  `settings.default_vertical_pack_id`.
-- Add UNIQUE index `ix_vertical_pack_id_unique` on `pack_id`
-  (partial: WHERE pack_id IS NOT NULL).
-- Keep nullable for now; B.6B may tighten to NOT NULL after the
-  full vertical/pack resolution story is decided.
+Single migration, single transaction, idempotent (uses
+`INSERT ... ON CONFLICT DO NOTHING` on the natural keys of each
+target table).
 
 `down_revision = "0019_lead_score_snapshot"`.
 
-### §5.2 Migration 0021: seed demo account + vertical + catalog
-
-Single transaction. Idempotent (uses `INSERT ... ON CONFLICT DO
-NOTHING` on natural keys).
+**Insert order** (FK satisfaction):
+1. `account` row
+2. `vertical` row
+3. 4× `lead_signal_definition` rows
+4. 4× `vertical_lead_signal_weight` rows
 
 Seeds:
 
-- **demo account** (stable UUIDv7 minted from a fixed seed; or use a
-  deterministic UUID5 from a namespace + "demo"). Name = "demo".
-- **demo vertical** linked to `settings.default_vertical_pack_id`.
-  Stable UUID.
-- **lead_signal_definition** rows for the 4 legacy signals:
+- **demo account**: deterministic id via UUID5 from a fixed
+  namespace + "demo" so the seed is reproducible and re-runs
+  collapse to no-ops.
+  - `display_name = "demo"`
+  - other defaults: `status="active"` (server_default),
+    `region="us"` (server_default), `parent_account_id=NULL`
+
+- **demo vertical** linked to the existing `pack_id` column:
+  - `pack_id = "local_business_ai_visibility"` (matches
+    `settings.default_vertical_pack_id`)
+  - `display_name = "Local Business AI Visibility"`
+  - `schema_version = 1`
+  - deterministic UUID5 id for reproducibility
+  - source: `app/vertical/packs/local_business_ai_visibility/__init__.py:47-49`
+
+- **lead_signal_definition** rows for the 4 legacy signals
+  (PK = `name`, FK target for the weight rows below). Each with:
+  - `source_kind = "computed"`
+  - `contributes_to = ["lead_quality"]` (audit-corrected from
+    `["business_visibility"]` to match the codebase convention
+    in `app/vertical/seed.py:60`)
+  - `default_enabled = true` (server_default)
+  - `default_weight` = the pack value below (preserves
+    numeric(4,3) precision; provenance in migration comment)
+  - `freshness_ttl_seconds` = `86400` (24h; matches the existing
+    `LeadSignalDefinition` test fixture default)
+  - `description` = brief one-line cite of the legacy probe
+
+  The 4 names:
   - `website_presence`
   - `google_business_presence`
   - `content_signals`
   - `reviews`
-  Each with `source_kind="computed"`, `contributes_to=["business_visibility"]`,
-  `default_enabled=true`, default_weight matching the pack value
-  (provenance comment).
+
 - **vertical_lead_signal_weight** rows for the demo vertical, ONE
-  row per signal, dimension="overall". Weights hard-coded with
-  provenance comment citing the pack source at seed time. `effective_from
-  = '2026-05-11 00:00:00+00'`, `effective_to NULL`, `enabled = TRUE`.
+  per signal:
+  - `dimension = "lead_quality"` (audit-corrected from `"overall"`
+    to match `LEAD_SIGNAL_WEIGHT_DEFAULT_DIMENSION` in
+    `app/vertical/seed.py:60`)
+  - `weight` = the pack value (numeric(4,3))
+  - `effective_from = '2026-05-11 00:00:00+00'`
+  - `effective_to = NULL` (active)
+  - `enabled = true` (server_default)
 
-`down_revision = "0020_add_pack_id_to_vertical"`.
-
-**Provenance comment block** (template, populated from actual pack at
-authoring time):
+**Provenance comment block** (populated with audit-verified values):
 
 ```
--- Weights mirror the active vertical pack at the time of seeding
--- (B.6A authored 2026-05-11; pack_id = settings.default_vertical_pack_id).
--- DO NOT auto-sync at runtime — see phase-b6a-plan.md §2 decision #4.
--- If pack weights change in vertical_signal_weight before B.6B,
--- re-run this seed OR document the divergence explicitly.
+-- Weights mirror the legacy pack-level WEIGHTS dict at seed time.
+-- Source: backend/app/vertical/packs/local_business_ai_visibility/weights.py
+-- (B.6A authored 2026-05-11; pack_id = "local_business_ai_visibility").
 --
--- Source values at seed time:
---   website_presence:           <value>
---   google_business_presence:   <value>
---   content_signals:            <value>
---   reviews:                    <value>
+-- NOTE: LEAD_SIGNAL_WEIGHTS in the pack is intentionally empty
+-- (B.4.6 deferred). The migration is the SOLE B.6A source of truth
+-- for canonical lead-scoring weights. Per phase-b6a-plan.md §2
+-- decision #4 + §3 out-of-scope.
+--
+-- DO NOT auto-sync at runtime — treat this migration as a frozen
+-- historical bootstrap artifact. If pack weights change before
+-- B.6B convergence, re-run this seed OR document the divergence.
+--
+-- Source values at seed time (sum = 1.000):
+--   website_presence:           0.300
+--   google_business_presence:   0.300
+--   content_signals:            0.200
+--   reviews:                    0.200
 ```
 
-### §5.3 What does NOT change
+### §5.2 What does NOT change
 
-- `vertical_signal_weight` (B.3.3) — legacy pack weights, untouched.
-  Authoritative for `analyze()` until B.6B.
+- `vertical.pack_id` column itself — already exists per B.3.3.
+  No schema migration in B.6A.
+- `vertical_signal_weight` (B.3.3) — legacy pack weights,
+  untouched. Authoritative for `analyze()` until B.6B.
+- `app/vertical/packs/local_business_ai_visibility/lead_signal_weights.py`
+  — pack `LEAD_SIGNAL_WEIGHTS` dict remains `{}` per §3 out-of-scope.
 - `vertical_template`, `vertical_signal_definition`,
   `lead_event_definition`, all existing leads/lead_signals/
   lead_events/lead_score_snapshot tables — untouched.
@@ -327,7 +372,7 @@ revertable. Smoke-test-first, verify-before-commit, stop between.
 | Sub-phase | Scope | Smoke gate |
 |---|---|---|
 | **B.6A.0** | This plan doc | doc renders; references resolve |
-| **B.6A.1** | Migrations 0020 + 0021 | alembic upgrade+downgrade clean; demo rows queryable; full backend test suite green |
+| **B.6A.1** | Migration 0020 (seed only) + verification tests | alembic upgrade+downgrade clean; demo rows queryable + assertable; existing 600 backend tests + new verification tests all green |
 | **B.6A.2** | `signal_results_to_observations` + unit tests | new tests pass; existing suite green |
 | **B.6A.3** | Divergence comparator + log helper + unit tests | dataclass round-trip tests pass; existing suite green |
 | **B.6A.4** | `analyze_and_persist` orchestrator + integration tests | orchestrator round-trip writes Lead + 4 LeadSignals + 1 LeadScoreSnapshot in one transaction; existing suite green |
@@ -435,9 +480,11 @@ code; it cannot affect this assertion.
 3. Wire HTTP endpoint to canonical persistence path (feature flag,
    fail-safe).
 4. Tighten `BRIDGE_DIVERGENCE_TOLERANCE` to 0 once legacy retired.
-5. Tighten `vertical.pack_id` to NOT NULL.
-6. Decide whether `vertical_signal_weight` (legacy pack weights)
+5. Decide whether `vertical_signal_weight` (legacy pack weights)
    table is deprecated, dropped, or repurposed.
+6. Decide whether to populate the pack's `LEAD_SIGNAL_WEIGHTS` dict
+   and converge sources (currently the seed migration is the sole
+   source of truth).
 7. Real-tenancy resolution (replace demo account).
 8. Lead dedupe / upsert semantics.
 
@@ -447,16 +494,20 @@ Each item is one or more B.6B sub-phases. None are in B.6A scope.
 
 ## §10 Rollback story
 
-B.6A is fully dark code with two migrations:
+B.6A is fully dark code with one seed migration:
 
 - Code-only revert (B.6A.2 → B.6A.5): `git revert` removes the new
   files. No production path depends on them. Tests are additive.
-  Migrations are unaffected.
-- Migration revert: `alembic downgrade -2` drops the seed rows
-  (0021 downgrade) and removes the `pack_id` column (0020
-  downgrade). Existing vertical/account/lead rows are untouched.
-- Full phase revert: code revert + alembic downgrade -2. Repo
-  returns to `3152f4a`-equivalent state.
+  Migration is unaffected.
+- Migration revert: `alembic downgrade -1` drops the seed rows
+  (0020 downgrade) — demo account + demo vertical + 4 signal
+  definitions + 4 lead weight rows. Existing vertical/account/lead
+  rows are untouched (the demo account is the only account row
+  this migration touches, and its UUID5 derivation makes its
+  identity unambiguous).
+- Full phase revert: code revert + alembic downgrade -1. Repo
+  returns to `1b303ab`-equivalent state (B.6A.0 plan doc still
+  present, no schema or data change applied).
 
 If B.6A.5 corpus tests reveal unfixable divergence: the bridge
 stays as latent infrastructure; B.6B is blocked until the
