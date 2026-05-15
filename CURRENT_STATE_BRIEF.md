@@ -1,7 +1,8 @@
 # CURRENT STATE BRIEF — AI Authority Intelligence Lab + TruSignalAI
 
 **Read this first in any new session before doing work.**
-**Last updated:** 2026-05-14 (evening — pre-build hardening complete)
+**Workspace mount (Cowork):** `C:\Users\luxco\Tru-find-ai-MVP` — request via `mcp__cowork__request_cowork_directory` at the start of every new Cowork thread before reading any artifact.
+**Last updated:** 2026-05-15 (Day-1 substrate proof landed; Blueprint §22 Test 1 passing live)
 
 ---
 
@@ -53,7 +54,7 @@ Full lock list: `03_PREQUAL_ENGINE/Phase_0_Freeze_Boundary.md`.
 
 ## Current Phase 0 status
 
-**Pre-build hardening COMPLETE. Builder confirmed. Ready to begin Day 1 substrate proof.**
+**Day-1 substrate proof LANDED (2026-05-15). Blueprint §22 Test 1 passing live. Append-only event substrate operational.**
 
 ### Builder model (locked 2026-05-14 evening)
 
@@ -67,6 +68,7 @@ Implementation discipline: err on the side of caution. Replayability, provenance
 
 1. **A1 Garage flagship deliverables location pending** — two files need manual copy from a prior session once a canonical destination is defined. Not blocking the Phase 0 build.
 2. **Validation oracle for engine v0.2** — to be defined when v0.2 is planned (consistent with the GR-4 Option A ruling: future calibration/dataset language remains explicitly undefined until formally materialized). Not blocking the v0.1.0 Phase 0 build.
+3. **Reconciliation-doc remaining items** — D3 (canonical release paths), D4 (entity naming: "A1 Garage" vs "AI Garage"), D5 (bare "TSA-FRAG" reference in Freeze Boundary §C + other nonexistent references), D6 (§1 → §5 citation), C2 (Blueprint §§4/5 don't list FastAPI / API module), DR-01…DR-15 drift-risk catalog. Source of truth: `03_PREQUAL_ENGINE/Phase_0_Governance_Reconciliation.md` "Remaining unresolved items". Note: item #1 in that section is partly stale — the F-H4/F-H5 alignment edits to Freeze Boundary §A have already landed (denominator=3; append-only=`events`-only). None of these items affect Day-1 scope.
 
 Technical decisions locked: Postgres 15+, MinIO via docker-compose, Typer for CLI, Pydantic v2.
 
@@ -102,3 +104,45 @@ This thread (current) is the pre-build hardening thread. Closed.
 ## Memory (auto-loaded continuity)
 
 The memory index `MEMORY.md` (in the Claude memory directory) loads automatically at the start of every new conversation. Individual memory entries are read on demand when relevant. Phase-0-relevant entries in the current index include `project_phase_0_pivot.md`, `project_two_repo_split.md`, `project_strategic_direction.md`, `project_platform_directive_v2_authority_infrastructure.md`, and `feedback_phase_gating.md`. The full set is enumerated in `MEMORY.md`.
+
+---
+
+## Session log
+
+### 2026-05-15 — Week 1 Build thread opened; Day-1 plan locked; no code yet
+
+- **Reconciliation cross-check:** `Phase_0_Governance_Reconciliation.md` exists at `03_PREQUAL_ENGINE/` and is properly chained via `MASTER_INDEX.md` (Supporting Reconciliation Artifact; #4 in Authority Order; #5 in Replayability Entry Points). No authority-chain amendment required.
+- **Day-1-impacting rulings already absorbed:** D2 / F-H5 (append-only = `events` only) and F-H4 / F-M2 (confidence denominator = 3) are present in `Phase_0_Freeze_Boundary.md` §A. The Reconciliation doc's "Remaining unresolved items #1" is partly stale on those two points.
+- **Day-1 layout decisions locked:**
+  - New `app/` package at repo root, alongside legacy `backend/`. Blueprint §5 layout exactly.
+  - Plain numbered SQL migrations under `app/db/migrations/` + minimal Python runner. No Alembic in substrate.
+  - Substrate Postgres on host port **5433** (backend already occupies 5432 via `infra/dev/docker-compose.yml`). MinIO on 9000/9001.
+- **Continuity edit:** workspace-mount line added at the top of this brief on 2026-05-15 to make Cowork re-entry self-evident.
+- **State on disk:** no executable substrate yet. No `app/`, no root `pyproject.toml`, no root `docker-compose.yml`. `git tag phase-0-hardening-complete` still at HEAD.
+
+### 2026-05-15 — Day-1 substrate proof landed (Blueprint §22 Test 1 live PASS)
+
+- **Steps 1-3 executed and verified end-to-end on host.** Substrate runtime operational.
+- **Migration applied live:** `bootstrap()` returned `['001_events']` on first run; idempotent on subsequent runs.
+- **Append-only triggers verified live** via `pg_trigger` query — all three present and in origin-enabled (`tgenabled = 'O'`) state:
+  - `events_append_only_update` (BEFORE UPDATE FOR EACH ROW)
+  - `events_append_only_delete` (BEFORE DELETE FOR EACH ROW)
+  - `events_append_only_truncate` (BEFORE TRUNCATE FOR EACH STATEMENT)
+- **Blueprint §22 Test 1 (Append-only event enforcement) — PASS live.** Smoke tests: `5 passed in 0.37s` covering INSERT-succeeds, UPDATE-rejected, DELETE-rejected, TRUNCATE-rejected, and trigger-presence verification.
+- **Append-only enforcement scope:** strictly the `events` table (ruling D2 / finding F-H5). Projection tables remain mutable derived state. TRUNCATE protection extends Blueprint §7's literal UPDATE/DELETE list to close the bypass path.
+- **Legacy backend untouched:** verified via `git diff --stat HEAD -- backend/ infra/` returning empty.
+- **State on disk:** new files: root `pyproject.toml`, `docker-compose.yml`, `app/` with 7 sub-packages (six empty + `db/` populated), `tests/test_events_append_only.py`. Substrate Postgres on host port 5433 (backend retains 5432). MinIO on 9000/9001.
+- **Checkpoint tag:** `day-1-substrate-proof` (created at the closeout commit).
+
+### Next-session resume
+
+1. Mount `C:\Users\luxco\Tru-find-ai-MVP` via `mcp__cowork__request_cowork_directory`.
+2. Read this brief end-to-end.
+3. Bring substrate services up: `docker compose up -d`; verify health with `docker compose ps`. Activate the substrate venv: `.\.venv-substrate\Scripts\Activate.ps1`.
+4. Confirm substrate state still valid: `python -c "from app.db import connection; print(connection.bootstrap())"` should return `[]` (idempotent — substrate already bootstrapped).
+5. **Resume at Day-1 Step 4:** Pydantic event-model foundation + emitter.
+   - `app/events/models.py` — base `Event` envelope (matches Blueprint §7 events-table fields) + first concrete payload model `EntityCreatedPayload` (entity_id, name, vertical, created_at_for_projection). All UUIDs and timestamps emitter-supplied per Governance & Replayability Part B "UUID sourcing rules" and "Timestamp sourcing rules".
+   - `app/events/emitter.py` — single-transaction INSERT into `events`; JSON payload serialized with `sort_keys=True` (Governance Mistake #7 prevention).
+   - Smoke test: emit one `entity.created` event for **A1 Garage Doors** (the canonical archetype per Blueprint §3 and the user's testing instruction). Verify row appears in `events`.
+6. Then Day-1 Steps 5-7: entity projector (`app/entities/projectors.py`) + migration 002 (`entities` mutable projection) → 30-minute replay test (`tests/test_replay_determinism.py`) → Day-1 checkpoint report.
+7. No commits until authorized. Daily closeout before sign-off.
