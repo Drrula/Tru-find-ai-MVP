@@ -1,0 +1,97 @@
+ontology_version: "1.1.0"
+status: "phase_0_locked"
+name: "TruSignalAI Phase 0 Ontology"
+description: "Minimal ontology surface required to prove the Phase 0 prequalification substrate."
+
+phase: "0"
+scope:
+  purpose: "Define the locked Phase 0 verticals and indicators used by the prequalification engine."
+  anti_scope:
+    - "No Phase 1 indicators"
+    - "No large taxonomy expansion"
+    - "No probe orchestration"
+    - "No LLM comparison ontology"
+    - "No UI-facing report taxonomy"
+
+verticals:
+  - id: "GARAGE_DOOR"
+    label: "Garage Door Operators"
+    phase_0: true
+    description: "Garage door service, repair, installation, and rollup-style operators."
+
+  - id: "DENTAL_DSO"
+    label: "Dental Service Organizations"
+    phase_0: true
+    description: "Dental practice platforms, DSOs, and multi-location dental operators."
+
+  - id: "HVAC"
+    label: "HVAC Operators"
+    phase_0: false
+    description: "Heating, ventilation, and air conditioning service operators included for calibration continuity."
+
+  - id: "HOME_SVC_FRANCHISE"
+    label: "Home Services Franchise Platforms"
+    phase_0: false
+    description: "Franchise-style home service platforms included for calibration continuity."
+
+  - id: "VETERINARY"
+    label: "Veterinary Operators"
+    phase_0: false
+    description: "Veterinary practice groups and platform operators included for calibration continuity."
+
+  - id: "AUTOMOTIVE"
+    label: "Automotive Operators"
+    phase_0: false
+    description: "Automotive dealership or service platforms included for calibration continuity."
+
+  - id: "INSURANCE"
+    label: "Insurance Operators"
+    phase_0: false
+    description: "Insurance brokerage or agency platforms included for calibration continuity."
+
+  - id: "WEALTH"
+    label: "Wealth Management Operators"
+    phase_0: false
+    description: "Wealth management and advisory platforms included for calibration continuity."
+
+indicators:
+  - id: "VERTICAL_BASE_PRIOR"
+    label: "Vertical Base Prior"
+    phase_0: true
+    role: "prior"
+    computation_mode: "config_lookup"
+    evidence_requirement: "Entity must have a valid vertical_id present in the ontology."
+    description: "Provides the baseline prequalification prior by vertical. This indicator supplies the prior probability and does not contribute an additional log-likelihood ratio."
+    expected_output:
+      value_type: "number"
+      range: [0.0, 1.0]
+
+  - id: "ACQ_PAGE_PRESENT"
+    label: "Acquisition Page Present"
+    phase_0: true
+    role: "likelihood_signal"
+    computation_mode: "automated"
+    evidence_requirement: "Fetched page content, source URL, content hash, and derived evidence showing pattern match or absence."
+    description: "Detects whether the operator publicly presents acquisition, partnership, joining, or growth-platform language."
+    expected_output:
+      value_type: "boolean"
+
+  - id: "MULTI_BRAND_DECLARED"
+    label: "Multi-Brand Declared"
+    phase_0: true
+    role: "likelihood_signal"
+    computation_mode: "analyst_set"
+    evidence_requirement: "Analyst-set observation must include at least one evidence reference or a structured note explaining the source."
+    description: "Captures whether the operator publicly or analyst-verifiably declares multiple brands, locations, groups, partner companies, acquired operators, or platform portfolio structure."
+    expected_output:
+      value_type: "boolean"
+
+removed_from_phase_0:
+  - id: "MULTI_TLD_OWNERSHIP"
+    reason: "Removed because WHOIS, DNS, and ownership inference introduce unnecessary fragility before the substrate itself is proven."
+    replacement: "MULTI_BRAND_DECLARED"
+
+governance:
+  ontology_change_rule: "No new verticals or indicators may be added to Phase 0 without explicit approval."
+  replayability_note: "Ontology definitions must be loaded as versioned release artifacts and referenced by engine versions."
+  source_of_truth: "This YAML is the authoritative Phase 0 ontology release."

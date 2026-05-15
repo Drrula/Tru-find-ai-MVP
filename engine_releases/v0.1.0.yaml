@@ -1,0 +1,152 @@
+engine_version: "0.1.0"
+status: "phase_0_locked"
+name: "TruSignalAI Phase 0 Scoring Engine"
+description: "Deterministic Phase 0 prequalification scoring configuration."
+
+bound_ontology_version: "1.1.0"
+
+phase: "0"
+
+governance:
+  scoring_mode: "deterministic"
+  learned_weights: false
+  replayability_required: true
+  source_of_truth: "This YAML is the authoritative Phase 0 engine release."
+  ontology_binding_rule: "Engine releases must bind to a specific ontology version."
+  modification_rule: "No scoring weights, priors, thresholds, or confidence rules may change without a new engine release version."
+
+calibration:
+  status: "manually_validated_directional"
+  calibration_dataset_size: 10
+  validation_notes:
+    - "A1 Garage validated as flagship_candidate."
+    - "Aspen Dental validated as materially lower-confidence control case."
+    - "A1 vs Aspen discrimination exceeded required threshold."
+    - "Mariner-style hybrid case routes to light_review instead of false flagship."
+    - "Missing MULTI_BRAND_DECLARED lowers confidence and prevents premature flagship routing."
+
+scoring:
+  model_type: "bayesian_logit"
+
+  formulas:
+    prior_logit: "ln(vertical_prior / (1 - vertical_prior))"
+    posterior_logit: "prior_logit + sum(indicator_log_lr_values)"
+    probability: "sigmoid(posterior_logit)"
+    sigmoid: "1 / (1 + exp(-x))"
+
+  replayability_rules:
+    - "Scoring runs must be reproducible from engine version, ontology version, entity state, and observed indicators."
+    - "No stochastic scoring behavior is permitted."
+    - "No learned inference is permitted in Phase 0."
+    - "No hidden runtime weight mutation is permitted."
+
+vertical_priors:
+  GARAGE_DOOR: 0.80
+  DENTAL_DSO: 0.70
+  HVAC: 0.90
+  HOME_SVC_FRANCHISE: 0.85
+  VETERINARY: 0.85
+  AUTOMOTIVE: 0.60
+  INSURANCE: 0.60
+  WEALTH: 0.60
+
+indicators:
+  VERTICAL_BASE_PRIOR:
+    role: "prior"
+    contributes_log_lr: false
+    description: "Supplies baseline prior probability by vertical."
+
+  ACQ_PAGE_PRESENT:
+    role: "likelihood_signal"
+    contributes_log_lr: true
+    computation_mode: "automated"
+
+    weights:
+      present: 1.2
+      absent: -0.6
+
+    notes:
+      - "Moderate signal only."
+      - "Unified-brand operators may still publish acquisition language."
+      - "Absence is mildly negative, not definitive."
+
+  MULTI_BRAND_DECLARED:
+    role: "likelihood_signal"
+    contributes_log_lr: true
+    computation_mode: "analyst_set"
+
+    weights:
+      present: 2.0
+      absent: -1.0
+
+    notes:
+      - "Strong positive signal when present."
+      - "Absence is moderately negative but not absolute."
+      - "Used in Phase 0 to validate analyst evidence and provenance flow."
+
+confidence:
+  formula: "observed_indicators / total_required_phase0_indicators"
+
+  total_required_phase0_indicators: 3
+
+  required_indicators:
+    - "VERTICAL_BASE_PRIOR"
+    - "ACQ_PAGE_PRESENT"
+    - "MULTI_BRAND_DECLARED"
+
+tier_thresholds:
+  flagship_candidate:
+    minimum_probability: 0.90
+    minimum_confidence: 0.80
+
+  full_audit_candidate:
+    minimum_probability: 0.70
+    minimum_confidence: 0.60
+
+  light_review:
+    minimum_probability: 0.50
+
+  watchlist:
+    minimum_probability: 0.25
+
+  ignore:
+    maximum_probability_exclusive: 0.25
+
+reference_cases:
+  A1_GARAGE:
+    vertical: "GARAGE_DOOR"
+    expected_behavior:
+      - "Expected flagship_candidate when all three indicators are favorable."
+      - "Expected downgrade to full_audit_candidate if MULTI_BRAND_DECLARED is missing."
+
+  ASPEN_DENTAL:
+    vertical: "DENTAL_DSO"
+    expected_behavior:
+      - "Expected materially lower probability than A1 Garage."
+
+  MARINER_STYLE_HYBRID:
+    vertical: "WEALTH"
+    expected_behavior:
+      - "Expected routing to light_review under mixed-signal conditions."
+
+phase_0_constraints:
+  allowed_indicator_count: 3
+
+  allowed_indicators:
+    - "VERTICAL_BASE_PRIOR"
+    - "ACQ_PAGE_PRESENT"
+    - "MULTI_BRAND_DECLARED"
+
+  prohibited_phase_0_behavior:
+    - "No hidden indicators"
+    - "No adaptive weighting"
+    - "No online learning"
+    - "No vector-search influence"
+    - "No LLM-derived scoring adjustments"
+    - "No multi-agent scoring orchestration"
+
+implementation_notes:
+  - "Engine release and ontology release must both be loaded before scoring execution."
+  - "Projection state is not source-of-truth; scoring derives from replayable event-backed state."
+  - "Recommendation tier is derived output, not permanent truth state."
+  - "This engine release intentionally prioritizes replayability and auditability over sophistication."
