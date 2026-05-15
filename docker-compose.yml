@@ -1,0 +1,56 @@
+# TruSignalAI Phase 0 substrate — local development infrastructure.
+#
+# Locked services per Phase_0_Execution_Blueprint.md §4 (Technology Choices)
+# and §19 (Day 1 Objective).
+#
+# Port 5433 is used for Postgres because the legacy backend already binds
+# 5432 in infra/dev/docker-compose.yml. MinIO uses default 9000 (S3 API) and
+# 9001 (web console).
+#
+# Do NOT extend this file with services outside the Phase 0 Freeze Boundary.
+# Any addition requires explicit executive-operator approval per
+# Phase_0_Governance_and_Replayability.md Part A.
+
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: trusignal-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: trusignal
+      POSTGRES_PASSWORD: trusignal
+      POSTGRES_DB: trusignal
+    ports:
+      - "5433:5432"
+    volumes:
+      - trusignal_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trusignal -d trusignal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:RELEASE.2024-05-10T01-41-38Z
+    container_name: trusignal-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: trusignal
+      MINIO_ROOT_PASSWORD: trusignal_minio_dev
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - trusignal_miniodata:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  trusignal_pgdata:
+  trusignal_miniodata:

@@ -1,0 +1,56 @@
+# TruSignalAI Phase 0 substrate — root project metadata.
+#
+# Locked architecture per:
+#   - 03_PREQUAL_ENGINE/Phase_0_Execution_Blueprint.md §4 (Technology Choices)
+#   - 03_PREQUAL_ENGINE/Phase_0_Execution_Blueprint.md §5 (Repo Structure Target)
+#   - 03_PREQUAL_ENGINE/Phase_0_Freeze_Boundary.md §A (Infrastructure)
+#
+# This substrate is intentionally isolated from the legacy backend/ project,
+# which retains its own pyproject.toml and virtualenv. Do not co-install the
+# two into the same environment.
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trusignal-substrate"
+version = "0.0.0"
+description = "TruSignalAI Phase 0 substrate runtime — event-sourced prequalification engine."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Andrew", email = "amvaux@gmail.com" }]
+
+# Day-1 runtime dependencies, strictly per Blueprint §4.
+dependencies = [
+  "pydantic>=2.6,<3",
+  "psycopg[binary]>=3.1,<4",
+  "typer>=0.12,<1",
+]
+
+[project.optional-dependencies]
+# Dev tooling per Blueprint §4 (pytest, ruff, mypy).
+dev = [
+  "pytest>=8.0,<9",
+  "ruff>=0.4,<1",
+  "mypy>=1.10,<2",
+]
+
+# Page-fetch dependencies reserved per Blueprint §4 (Playwright + httpx).
+# Not installed by default; Day-1 scope does not exercise them.
+fetch = [
+  "httpx>=0.27,<1",
+  "playwright>=1.44,<2",
+]
+
+[tool.setuptools.packages.find]
+include = ["app", "app.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
