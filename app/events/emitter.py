@@ -1,19 +1,23 @@
 """
 app.events.emitter — TruSignalAI Phase 0 single-transaction event emitter.
 
-Day-1 Step 4 scope:
-    - Provide `emit_entity_created(...)`: generate event_id, occurred_at,
+Scope:
+    - Day-1 Step 4 added `emit_entity_created(...)`.
+    - Day-1 Step 8 added `emit_evidence_raw_ingested(...)`.
+    - Both functions follow the same shape: generate event_id, occurred_at,
       recorded_at emitter-side; serialize the typed payload to JSONB with
       deterministic key ordering; INSERT one row into the events table
       inside the caller's transaction.
     - The caller owns transaction control (commit / rollback). The emitter
-      performs exactly one SQL statement: the INSERT. No side effects
-      outside the database.
+      performs exactly one SQL statement per call: the INSERT. No side
+      effects outside the database. No registry, no dispatcher — each
+      event type has its own explicit emit function.
 
-Out of scope (deferred to subsequent Day-1 steps and beyond):
-    - Projector logic (Day-1 Step 5).
-    - Replay reading the event log (Day-1 Step 6).
-    - Additional event types and their dispatch (Day 2+).
+Out of scope (deferred to subsequent steps and beyond):
+    - Evidence projection / projector (Step 9+).
+    - Replay engine module (intentionally absent; replay is proven by
+      tests/test_replay_determinism.py, not by a framework).
+    - Additional event types beyond the two above.
     - Causation / correlation graph construction beyond passing the IDs.
 
 Replay-determinism contract (Phase_0_Governance_and_Replayability.md Part B):
@@ -44,7 +48,9 @@ import psycopg
 
 from app.events.models import (
     AGGREGATE_TYPE_ENTITY,
+    AGGREGATE_TYPE_EVIDENCE,
     EntityCreatedPayload,
+    EvidenceRawIngestedPayload,
     Event,
 )
 
@@ -60,6 +66,7 @@ from app.events.models import (
 # ---------------------------------------------------------------------------
 
 ENTITY_CREATED_SCHEMA_VERSION: str = "1.0.0"
+EVIDENCE_RAW_INGESTED_SCHEMA_VERSION: str = "1.0.0"
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +109,52 @@ def emit_entity_created(
         aggregate_id=payload.entity_id,
         payload=payload,
         schema_version=ENTITY_CREATED_SCHEMA_VERSION,
+        occurred_at=now,
+        recorded_at=now,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        causation_id=causation_id,
+        correlation_id=correlation_id,
+    )
+
+    _insert_event(conn, event)
+    return event
+
+
+def emit_evidence_raw_ingested(
+    conn: psycopg.Connection,
+    *,
+    payload: EvidenceRawIngestedPayload,
+    actor_type: str,
+    actor_id: str,
+    causation_id: uuid.UUID | None = None,
+    correlation_id: uuid.UUID | None = None,
+) -> Event:
+    """
+    Emit one `evidence.raw_ingested` event for the given payload.
+
+    Generates `event_id`, `occurred_at`, and `recorded_at` here in the
+    emitter; persists the resulting Event into the events table; returns
+    the populated envelope. The aggregate_id is set to payload.evidence_id
+    by the evidence.* convention (one evidence record, one aggregate;
+    aggregate_id is the evidence_id). Linkage to an entity, if any, is
+    carried in payload.subject_entity_id — NOT in the aggregate graph.
+
+    Transactional contract:
+        - The single INSERT runs inside the caller-supplied connection's
+          current transaction (psycopg autocommit=False default).
+        - The caller is responsible for commit() / rollback().
+    """
+    event_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    event = Event(
+        event_id=event_id,
+        event_type="evidence.raw_ingested",
+        aggregate_type=AGGREGATE_TYPE_EVIDENCE,
+        aggregate_id=payload.evidence_id,
+        payload=payload,
+        schema_version=EVIDENCE_RAW_INGESTED_SCHEMA_VERSION,
         occurred_at=now,
         recorded_at=now,
         actor_type=actor_type,

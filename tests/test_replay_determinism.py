@@ -57,8 +57,12 @@ import pytest
 
 from app.db import connection as db
 from app.entities.projectors import project_entity_created
-from app.events.emitter import emit_entity_created
-from app.events.models import EntityCreatedPayload, Event
+from app.events.emitter import emit_entity_created, emit_evidence_raw_ingested
+from app.events.models import (
+    EntityCreatedPayload,
+    Event,
+    EvidenceRawIngestedPayload,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -144,9 +148,32 @@ def _replay_entity_created_events(conn: psycopg.Connection) -> int:
     This helper is intentionally inlined in the test module. It is NOT a
     replay framework, NOT exported from app.events, and NOT reusable
     infrastructure. Future replay work will be authorized separately.
+
+    WARNING — manual replay-filter maintenance contract:
+        The SQL filter `WHERE event_type = 'entity.created'` below is the
+        ONLY mechanism that keeps this helper correct as new event types
+        are added to the log. When a future day adds another event type
+        that MUTATES THE ENTITIES PROJECTION (e.g. entity.attribute_set,
+        entity.domain_registered), that event type MUST be added to this
+        filter AND the helper extended to dispatch to its projector.
+        Otherwise the replay-determinism tests will silently pass — the
+        snapshot hash before/after the wipe-and-replay cycle compares only
+        the events the helper *did* re-apply — while production replay is
+        actually incomplete. There is intentionally NO framework /
+        registry / dispatcher enforcing this; the contract is held by
+        the test author at the point of adding the new event type.
+
+        As of Step 8, only `entity.created` mutates `entities`. The
+        `evidence.raw_ingested` event type is intentionally NOT in this
+        filter — it has no projector yet (deferred to Step 9+), and even
+        when it does, it will not write to `entities`.
     """
     with conn.cursor() as cur:
         cur.execute(
+            # WARNING: when a new entity-affecting event type lands,
+            # extend this WHERE clause (e.g. `event_type IN (...)`) and
+            # add the corresponding projector dispatch below. See the
+            # helper docstring for the full maintenance contract.
             "SELECT event_id, event_type, aggregate_type, aggregate_id, "
             "payload, schema_version, occurred_at, recorded_at, "
             "actor_type, actor_id, causation_id, correlation_id "
@@ -252,6 +279,115 @@ def test_replay_rebuilds_entities_projection_deterministically(
     assert hash_after == hash_before, (
         "Replay determinism violated: rebuilt entities snapshot does not "
         "hash to the same value as the original projection.\n"
+        f"  before: {hash_before}\n"
+        f"  after:  {hash_after}"
+    )
+
+
+# ===========================================================================
+# Step 8 extension — mixed entity.created + evidence.raw_ingested log
+# ===========================================================================
+
+
+_SYNTHETIC_EVIDENCE_CONTENT: bytes = (
+    b"<html><body>A1 Garage Doors - synthetic Step-8 replay fixture</body></html>"
+)
+
+
+def _synthetic_evidence_payload(
+    *, subject_entity_id: uuid.UUID
+) -> EvidenceRawIngestedPayload:
+    """
+    Build a deterministic synthetic evidence payload linked to the given
+    entity. No external storage is touched; storage_uri is a placeholder.
+    """
+    return EvidenceRawIngestedPayload(
+        evidence_id=uuid.uuid4(),
+        subject_entity_id=subject_entity_id,
+        source_uri="https://example.invalid/a1-garage-doors",
+        source_type="website_fetch",
+        content_hash=hashlib.sha256(_SYNTHETIC_EVIDENCE_CONTENT).hexdigest(),
+        storage_uri="s3://substrate-evidence/synthetic/a1-garage-doors.html",
+        observed_at_for_projection=datetime.now(timezone.utc),
+        metadata={"http_status": "200", "vertical": "GARAGE_DOOR"},
+    )
+
+
+def test_replay_determinism_robust_to_mixed_event_types(
+    conn: psycopg.Connection,
+) -> None:
+    """
+    Step 8 invariant: adding `evidence.raw_ingested` events to the
+    append-only event log MUST NOT break deterministic replay of the
+    existing `entities` projection. The replay helper filters by
+    event_type, so evidence rows are read-and-skipped; the entities
+    snapshot must rebuild byte-identical across the wipe-and-replay
+    cycle, and both event-type counts must remain unchanged (the event
+    log is append-only and is never modified by replay).
+    """
+    # 1. Emit canonical A1 Garage Doors entity.created, then project.
+    entity_event = _emit_a1_event(conn)
+    project_entity_created(conn, entity_event)
+
+    # 2. Emit one evidence.raw_ingested linked to A1 Garage Doors. There
+    #    is intentionally no evidence projector — the projection table
+    #    does not exist yet (deferred to Step 9+).
+    evidence_payload = _synthetic_evidence_payload(
+        subject_entity_id=entity_event.payload.entity_id,
+    )
+    emit_evidence_raw_ingested(
+        conn,
+        payload=evidence_payload,
+        actor_type="analyst",
+        actor_id="andrew",
+    )
+
+    # 3. Snapshot the entities table + capture event-type counts.
+    hash_before = _snapshot_entities_hash(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM events WHERE event_type = 'entity.created'"
+        )
+        entity_events_before = cur.fetchone()[0]
+        cur.execute(
+            "SELECT count(*) FROM events "
+            "WHERE event_type = 'evidence.raw_ingested'"
+        )
+        evidence_events_before = cur.fetchone()[0]
+    assert entity_events_before >= 1
+    assert evidence_events_before >= 1
+
+    # 4. Clear ONLY the mutable entities projection. The events table
+    #    (now containing both event types) must remain untouched.
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM entities")
+        cur.execute("SELECT count(*) FROM entities")
+        assert cur.fetchone()[0] == 0
+
+    # 5. Rebuild via the existing replay helper, which filters
+    #    event_type = 'entity.created' — evidence rows are read and
+    #    skipped by SQL predicate, not by Python dispatch.
+    rebuilt_count = _replay_entity_created_events(conn)
+    assert rebuilt_count == entity_events_before
+
+    # 6. Both event-type counts are unchanged after replay.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM events WHERE event_type = 'entity.created'"
+        )
+        assert cur.fetchone()[0] == entity_events_before
+        cur.execute(
+            "SELECT count(*) FROM events "
+            "WHERE event_type = 'evidence.raw_ingested'"
+        )
+        assert cur.fetchone()[0] == evidence_events_before
+
+    # 7. Hash matches — adding evidence events did not perturb entity replay.
+    hash_after = _snapshot_entities_hash(conn)
+    assert hash_after == hash_before, (
+        "Step 8 invariant violated: introducing evidence.raw_ingested "
+        "events into the append-only log broke entity-projection replay "
+        "determinism.\n"
         f"  before: {hash_before}\n"
         f"  after:  {hash_after}"
     )

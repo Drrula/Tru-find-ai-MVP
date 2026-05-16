@@ -3,11 +3,12 @@ app.events.models — TruSignalAI Phase 0 event-model foundation.
 
 Pydantic v2 models for the canonical append-only event log.
 
-Day-1 Step 4 scope:
-    - Only the `entity.created` event type and its payload are defined here.
-      Blueprint §8 lists nine other minimum event types (entity.attribute_set,
-      entity.domain_registered, ontology.version_loaded, engine.version_loaded,
-      evidence.raw_ingested, evidence.derived_created, indicator.observed,
+Scope:
+    - Day-1 Step 4 introduced `entity.created` + EntityCreatedPayload.
+    - Day-1 Step 8 introduced `evidence.raw_ingested` + EvidenceRawIngestedPayload.
+      Blueprint §8 lists eight remaining minimum event types
+      (entity.attribute_set, entity.domain_registered, ontology.version_loaded,
+      engine.version_loaded, evidence.derived_created, indicator.observed,
       indicator.analyst_set, scoring.run_completed); those land in later
       days as their respective work surfaces are authorized.
     - No projector logic, no replay logic, no DB I/O. Pure data structures.
@@ -32,18 +33,18 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
 # Event-type literal
 # ---------------------------------------------------------------------------
 
-EventType = Literal["entity.created"]
+EventType = Literal["entity.created", "evidence.raw_ingested"]
 """
-Phase 0 event-type discriminator. Day-1 Step 4 introduces only
-`entity.created`; subsequent days extend this to a discriminated union
-over the full Blueprint §8 minimum set.
+Phase 0 event-type discriminator. Day-1 Step 4 introduced `entity.created`;
+Day-1 Step 8 added `evidence.raw_ingested`. Subsequent days extend this
+toward the full Blueprint §8 minimum set.
 """
 
 
@@ -55,6 +56,15 @@ AGGREGATE_TYPE_ENTITY: str = "entity"
 """
 Aggregate type for entity.* events. The aggregate_id of an entity.created
 event is the entity_id itself (by convention enforced in the emitter).
+"""
+
+AGGREGATE_TYPE_EVIDENCE: str = "evidence"
+"""
+Aggregate type for evidence.* events. The aggregate_id of an
+evidence.raw_ingested event is the evidence_id itself (by convention
+enforced in the emitter). Each evidence record is its own aggregate;
+linkage to an entity is carried as `subject_entity_id` in the payload,
+not as aggregate-graph membership.
 """
 
 
@@ -98,6 +108,77 @@ class EntityCreatedPayload(BaseModel):
     created_at_for_projection: datetime
 
 
+class EvidenceRawIngestedPayload(BaseModel):
+    """
+    Payload for `evidence.raw_ingested` events.
+
+    Represents the ingestion of a single raw external observation (e.g. a
+    fetched web page, a DNC registry API response, an analyst paste-in).
+    The raw bytes themselves are NEVER in the payload — they live in
+    external storage addressed by `storage_uri`. The payload carries only
+    the provenance metadata + a `content_hash` so that future replay can
+    re-validate integrity without re-fetching from the original source.
+
+    Fields:
+        evidence_id              — stable UUID for the evidence record.
+                                   Aggregate convention: aggregate_id ==
+                                   evidence_id, enforced in the emitter.
+        subject_entity_id        — optional UUID linking the evidence to
+                                   an entity. Nullable so that evidence
+                                   captured before entity creation (e.g.
+                                   a DNC lookup on a phone number before
+                                   the entity exists) is expressible.
+        source_uri               — canonical URI of the source observed
+                                   (e.g. "https://example.invalid/contact").
+        source_type              — discriminator string (e.g.
+                                   "website_fetch", "dnc_registry_lookup",
+                                   "manual_analyst_note"). Free-form at
+                                   this layer; future projections may
+                                   constrain.
+        content_hash             — SHA-256 of the raw content, expressed
+                                   as exactly 64 lowercase hex characters.
+                                   Provenance + replay-integrity hook.
+        storage_uri              — URI identifying where the raw bytes
+                                   live (e.g. "s3://bucket/path",
+                                   "minio://...", "file:///..."). Storage
+                                   backend is opaque at this layer; no
+                                   MinIO / S3 integration is implied by
+                                   accepting the URI shape.
+        observed_at_for_projection — logical observation time. A future
+                                     evidence projector will write this
+                                     directly into its projection table
+                                     (same replay-determinism discipline
+                                     as EntityCreatedPayload).
+        metadata                 — flat dict[str, str] of additional
+                                   provenance metadata (e.g.
+                                   `{"http_status": "200", "vertical":
+                                   "GARAGE_DOOR"}`). Constrained to
+                                   str→str to keep JSONB shape stable.
+
+    Out of scope for Day-1 Step 8 (do NOT add here):
+        - raw_content (the bytes). External storage only.
+        - Storage backend abstractions. storage_uri is opaque.
+        - DNC-specific fields. DNC plugs in later as a particular
+          source_type value, NOT as a new payload type.
+        - Evidence projection table or projector (Step 9+).
+
+    Pydantic config:
+        - frozen=True       — payload is immutable after construction.
+        - extra="forbid"    — unknown fields raise (Mistake #8 prevention).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    evidence_id: uuid.UUID
+    subject_entity_id: uuid.UUID | None = None
+    source_uri: str = Field(..., min_length=1)
+    source_type: str = Field(..., min_length=1)
+    content_hash: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    storage_uri: str = Field(..., min_length=1)
+    observed_at_for_projection: datetime
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
 # ---------------------------------------------------------------------------
 # Event envelope (Blueprint §7 column set, emitter-supplied subset)
 # ---------------------------------------------------------------------------
@@ -114,9 +195,14 @@ class Event(BaseModel):
     emitter is forced to be explicit about UUID / timestamp generation
     (Governance & Replayability Mistakes #1, #2 prevention).
 
-    For Day-1 Step 4 the envelope's `payload` field is statically typed to
-    `EntityCreatedPayload`; later days will widen this to a discriminated
-    union over additional payload types as they come online.
+    Day-1 Step 8 widens the `payload` field from the single
+    `EntityCreatedPayload` to a plain Union over the two payload types
+    currently defined (`EntityCreatedPayload | EvidenceRawIngestedPayload`).
+    Plain Union (not a Pydantic discriminated union) is sufficient because
+    the two payloads have strictly disjoint required-field sets and both
+    use `extra="forbid"`; future payload types must keep their required
+    fields disjoint from existing payloads, OR this field upgrades to an
+    explicit discriminated union at that time.
 
     Pydantic config:
         - frozen=True    — events are immutable values; append-only by
@@ -130,7 +216,7 @@ class Event(BaseModel):
     event_type: EventType
     aggregate_type: str
     aggregate_id: uuid.UUID
-    payload: EntityCreatedPayload
+    payload: EntityCreatedPayload | EvidenceRawIngestedPayload
     schema_version: str = Field(..., min_length=1)
     occurred_at: datetime
     recorded_at: datetime
@@ -138,3 +224,41 @@ class Event(BaseModel):
     actor_id: str = Field(..., min_length=1)
     causation_id: uuid.UUID | None = None
     correlation_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def _validate_aggregate_id_matches_payload(self) -> "Event":
+        """
+        Structural invariant: an event's aggregate_id must equal the
+        identity field of its payload (entity_id for entity.created,
+        evidence_id for evidence.raw_ingested). Emitters set this by
+        convention; the validator enforces it at construction time so
+        replay can never resurrect a misaligned envelope from storage
+        without raising. Future event types extend the `event_type`
+        Literal AND this validator together.
+        """
+        if self.event_type == "entity.created":
+            if not isinstance(self.payload, EntityCreatedPayload):
+                raise ValueError(
+                    "entity.created event must carry an EntityCreatedPayload, "
+                    f"got {type(self.payload).__name__}"
+                )
+            if self.aggregate_id != self.payload.entity_id:
+                raise ValueError(
+                    "entity.created: aggregate_id "
+                    f"({self.aggregate_id}) must equal payload.entity_id "
+                    f"({self.payload.entity_id})"
+                )
+        elif self.event_type == "evidence.raw_ingested":
+            if not isinstance(self.payload, EvidenceRawIngestedPayload):
+                raise ValueError(
+                    "evidence.raw_ingested event must carry an "
+                    "EvidenceRawIngestedPayload, "
+                    f"got {type(self.payload).__name__}"
+                )
+            if self.aggregate_id != self.payload.evidence_id:
+                raise ValueError(
+                    "evidence.raw_ingested: aggregate_id "
+                    f"({self.aggregate_id}) must equal payload.evidence_id "
+                    f"({self.payload.evidence_id})"
+                )
+        return self
