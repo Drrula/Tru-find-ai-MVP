@@ -148,16 +148,43 @@ def test_delete_on_events_is_rejected(conn: psycopg.Connection) -> None:
     assert "append_only_violation" in str(excinfo.value)
 
 
-def test_truncate_on_events_is_rejected(conn: psycopg.Connection) -> None:
+def test_bare_truncate_events_is_rejected_by_fk_planner(
+    conn: psycopg.Connection,
+) -> None:
     """
-    TRUNCATE does not fire row-level UPDATE/DELETE triggers; the substrate
-    relies on a statement-level BEFORE TRUNCATE trigger to keep the event log
-    truly insert-only. This test exercises that path with no rows present —
-    the trigger fires unconditionally on the TRUNCATE statement itself.
+    Once the entities projection (Day-1 Step 5, migration 002) is in place,
+    entities.created_event_id REFERENCES events(event_id). PostgreSQL's
+    planner refuses a bare `TRUNCATE events` BEFORE the statement-level
+    append-only trigger fires, raising FeatureNotSupported. This is the
+    first of two independent reject paths the substrate now provides
+    against TRUNCATE on events; the trigger path is exercised by
+    `test_truncate_events_cascade_is_rejected_by_trigger`.
+
+    The append-only guarantee is strengthened, not weakened — the user
+    cannot get past either reject path to actually truncate the log.
+    """
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.FeatureNotSupported) as excinfo:
+            cur.execute("TRUNCATE events")
+    msg = str(excinfo.value)
+    assert "foreign key constraint" in msg
+    assert "entities" in msg
+
+
+def test_truncate_events_cascade_is_rejected_by_trigger(
+    conn: psycopg.Connection,
+) -> None:
+    """
+    The substrate's BEFORE TRUNCATE statement-level trigger on events is
+    the canonical mechanism that keeps the event log truly insert-only —
+    it fires regardless of FK presence. With CASCADE supplied, the FK
+    planner allows the statement through; the trigger then fires before
+    any rows are touched and raises P0001 (append_only_violation),
+    rolling back the entire statement (including its cascade reach).
     """
     with conn.cursor() as cur:
         with pytest.raises(psycopg.errors.RaiseException) as excinfo:
-            cur.execute("TRUNCATE events")
+            cur.execute("TRUNCATE events CASCADE")
     assert "append_only_violation" in str(excinfo.value)
     assert "TRUNCATE" in str(excinfo.value)
 
