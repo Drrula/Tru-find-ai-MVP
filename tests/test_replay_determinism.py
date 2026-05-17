@@ -63,6 +63,7 @@ from app.events.models import (
     Event,
     EvidenceRawIngestedPayload,
 )
+from app.evidence.projectors import project_evidence_raw_ingested
 
 
 # ---------------------------------------------------------------------------
@@ -390,4 +391,358 @@ def test_replay_determinism_robust_to_mixed_event_types(
         "determinism.\n"
         f"  before: {hash_before}\n"
         f"  after:  {hash_after}"
+    )
+
+
+# ===========================================================================
+# Step 9 extensions — evidence_raw projection replay determinism
+# ===========================================================================
+
+
+_EVIDENCE_RAW_COLUMNS: tuple[str, ...] = (
+    "evidence_id",
+    "subject_entity_id",
+    "source_uri",
+    "source_type",
+    "content_hash",
+    "storage_uri",
+    "observed_at_for_projection",
+    "created_event_id",
+    "projected_at",
+)
+
+
+def _snapshot_evidence_raw_hash(conn: psycopg.Connection) -> str:
+    """
+    Read evidence_raw with a deterministic column list and primary-key
+    sort, serialize via json.dumps(sort_keys=True, default=str), and
+    SHA-256. Mirrors _snapshot_entities_hash for the second projection.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT evidence_id, subject_entity_id, source_uri, source_type, "
+            "content_hash, storage_uri, observed_at_for_projection, "
+            "created_event_id, projected_at "
+            "FROM evidence_raw "
+            "ORDER BY evidence_id"
+        )
+        rows = cur.fetchall()
+    rows_as_dicts = [dict(zip(_EVIDENCE_RAW_COLUMNS, row)) for row in rows]
+    serialized = json.dumps(rows_as_dicts, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _emit_a1_evidence_event(
+    conn: psycopg.Connection,
+    *,
+    subject_entity_id: uuid.UUID | None = None,
+) -> Event:
+    """
+    Emit a synthetic A1 Garage Doors evidence.raw_ingested event for the
+    Step-9 replay-determinism tests. Mirrors the canonical fixture in
+    tests/test_evidence_projector.py but is duplicated here intentionally
+    to keep test modules self-contained (no cross-test-module helpers).
+    """
+    payload = EvidenceRawIngestedPayload(
+        evidence_id=uuid.uuid4(),
+        subject_entity_id=subject_entity_id,
+        source_uri="https://example.invalid/a1-garage-doors",
+        source_type="website_fetch",
+        content_hash=hashlib.sha256(_SYNTHETIC_EVIDENCE_CONTENT).hexdigest(),
+        storage_uri="s3://substrate-evidence/synthetic/a1-garage-doors.html",
+        observed_at_for_projection=datetime.now(timezone.utc),
+        metadata={"http_status": "200", "vertical": "GARAGE_DOOR"},
+    )
+    return emit_evidence_raw_ingested(
+        conn,
+        payload=payload,
+        actor_type="analyst",
+        actor_id="andrew",
+    )
+
+
+def _replay_evidence_raw_ingested_events(conn: psycopg.Connection) -> int:
+    """
+    Re-read evidence.raw_ingested rows from the append-only events table
+    in sequence_no ASC order, reconstruct Event objects, and re-project
+    each through the Step 9 projector. Returns the count projected.
+
+    All UUIDs and timestamps come from the row; nothing is regenerated.
+    The payload JSONB is parsed back into EvidenceRawIngestedPayload by
+    Pydantic.
+
+    This helper is intentionally inlined in the test module. It is NOT a
+    replay framework, NOT exported from app.evidence, and NOT reusable
+    infrastructure. Future replay work will be authorized separately.
+
+    WARNING — manual replay-filter maintenance contract:
+        The SQL filter `WHERE event_type = 'evidence.raw_ingested'` below
+        is the ONLY mechanism that keeps this helper correct as new event
+        types are added to the log. When a future day adds another event
+        type that MUTATES THE evidence_raw PROJECTION (e.g. a hypothetical
+        evidence.attribute_set), that event type MUST be added to this
+        filter AND the helper extended. Otherwise replay-determinism tests
+        will silently pass — the snapshot hash before/after the
+        wipe-and-replay cycle compares only the events the helper *did*
+        re-apply — while production replay is actually incomplete. There
+        is intentionally NO framework / registry / dispatcher enforcing
+        this; the contract is held by the test author at the point of
+        adding the new event type. The identical contract applies to
+        `_replay_entity_created_events` for the entities projection.
+
+        As of Step 9, only `evidence.raw_ingested` mutates `evidence_raw`.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            # WARNING: when a new evidence-affecting event type lands,
+            # extend this WHERE clause (e.g. `event_type IN (...)`) and
+            # add the corresponding projector dispatch below. See the
+            # helper docstring for the full maintenance contract.
+            "SELECT event_id, event_type, aggregate_type, aggregate_id, "
+            "payload, schema_version, occurred_at, recorded_at, "
+            "actor_type, actor_id, causation_id, correlation_id "
+            "FROM events "
+            "WHERE event_type = 'evidence.raw_ingested' "
+            "ORDER BY sequence_no ASC"
+        )
+        rows = cur.fetchall()
+
+    count = 0
+    for row in rows:
+        payload = EvidenceRawIngestedPayload(**row[4])
+        event = Event(
+            event_id=row[0],
+            event_type=row[1],
+            aggregate_type=row[2],
+            aggregate_id=row[3],
+            payload=payload,
+            schema_version=row[5],
+            occurred_at=row[6],
+            recorded_at=row[7],
+            actor_type=row[8],
+            actor_id=row[9],
+            causation_id=row[10],
+            correlation_id=row[11],
+        )
+        project_evidence_raw_ingested(conn, event)
+        count += 1
+    return count
+
+
+def test_replay_rebuilds_evidence_raw_projection_deterministically(
+    conn: psycopg.Connection,
+) -> None:
+    """
+    Step 9 proof — mirror of the Step 6 entity-projection replay test
+    applied to the new evidence_raw projection. Clearing evidence_raw and
+    rebuilding from the append-only events log produces a byte-identical
+    projection state.
+
+    No entity is created in this test — subject_entity_id is a soft
+    pointer at the projection layer (no FK to entities), so the evidence
+    row stands alone.
+    """
+    # 1. Emit one evidence.raw_ingested with a fresh synthetic
+    #    subject_entity_id UUID (no entity row needed at this layer).
+    placeholder_entity_id = uuid.uuid4()
+    evidence_event = _emit_a1_evidence_event(
+        conn, subject_entity_id=placeholder_entity_id,
+    )
+
+    # 2. Project via the Step 9 projector.
+    project_evidence_raw_ingested(conn, evidence_event)
+
+    # 3. Snapshot + hash — the "expected" state.
+    hash_before = _snapshot_evidence_raw_hash(conn)
+
+    # 4a. Capture the events count so we can prove the event log is
+    #     untouched by replay.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM events "
+            "WHERE event_type = 'evidence.raw_ingested'"
+        )
+        events_count_before = cur.fetchone()[0]
+    assert events_count_before >= 1
+
+    # 4b. Clear ONLY the mutable evidence_raw projection. The events
+    #     table is left untouched — replay's source-of-truth invariant.
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM evidence_raw")
+        cur.execute("SELECT count(*) FROM evidence_raw")
+        assert cur.fetchone()[0] == 0
+
+    # 5. Rebuild from events (ORDER BY sequence_no ASC;
+    #    evidence.raw_ingested only).
+    rebuilt_count = _replay_evidence_raw_ingested_events(conn)
+    assert rebuilt_count == events_count_before
+
+    # 5a. Event log is unchanged after replay.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM events "
+            "WHERE event_type = 'evidence.raw_ingested'"
+        )
+        events_count_after = cur.fetchone()[0]
+    assert events_count_after == events_count_before
+
+    # 6. Re-hash and assert byte-equal.
+    hash_after = _snapshot_evidence_raw_hash(conn)
+    assert hash_after == hash_before, (
+        "Step 9 invariant violated: rebuilt evidence_raw snapshot does "
+        "not hash to the same value as the original projection.\n"
+        f"  before: {hash_before}\n"
+        f"  after:  {hash_after}"
+    )
+
+
+def test_replay_rebuilds_both_projections_after_combined_wipe(
+    conn: psycopg.Connection,
+) -> None:
+    """
+    Step 9 combined-projection invariant: with both entities AND
+    evidence_raw populated from a mixed, interleaved event log, wiping
+    BOTH projections and replaying via a SINGLE sequence_no-ordered pass
+    with inline if/elif dispatch rebuilds both projections byte-identical.
+
+    Replay-dispatch discipline:
+        - Single SELECT across all event types, ordered by sequence_no.
+        - Inline if/elif branching on event_type.
+        - No registry. No dispatcher. No generalized engine. No helper
+          extraction beyond what already exists in this test module.
+        - When a future event type lands, add an `elif` branch here AND
+          (if it mutates a projection) extend the relevant per-type
+          replay helper. Both are manual contracts held by the test
+          author at the point of adding the new event type.
+    """
+    # 1. Emit multiple interleaved events:
+    #      entity #1 → evidence #1 → entity #2 → evidence #2
+    entity_event_1 = _emit_a1_event(conn)
+    project_entity_created(conn, entity_event_1)
+
+    evidence_event_1 = _emit_a1_evidence_event(
+        conn, subject_entity_id=entity_event_1.payload.entity_id,
+    )
+    project_evidence_raw_ingested(conn, evidence_event_1)
+
+    entity_event_2 = _emit_a1_event(conn)
+    project_entity_created(conn, entity_event_2)
+
+    evidence_event_2 = _emit_a1_evidence_event(
+        conn, subject_entity_id=entity_event_2.payload.entity_id,
+    )
+    project_evidence_raw_ingested(conn, evidence_event_2)
+
+    # 2. Snapshot BOTH projections.
+    entities_hash_before = _snapshot_entities_hash(conn)
+    evidence_hash_before = _snapshot_evidence_raw_hash(conn)
+
+    # 3. Capture both event-type counts.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM events WHERE event_type = 'entity.created'"
+        )
+        entity_count_before = cur.fetchone()[0]
+        cur.execute(
+            "SELECT count(*) FROM events "
+            "WHERE event_type = 'evidence.raw_ingested'"
+        )
+        evidence_count_before = cur.fetchone()[0]
+    assert entity_count_before >= 2
+    assert evidence_count_before >= 2
+
+    # 4. Wipe BOTH projections. evidence_raw first (the "more downstream"
+    #    projection); entities second. The events log is left untouched.
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM evidence_raw")
+        cur.execute("DELETE FROM entities")
+        cur.execute("SELECT count(*) FROM evidence_raw")
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT count(*) FROM entities")
+        assert cur.fetchone()[0] == 0
+
+    # 5. Single sequence_no-ordered pass with inline if/elif dispatch.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT event_id, event_type, aggregate_type, aggregate_id, "
+            "payload, schema_version, occurred_at, recorded_at, "
+            "actor_type, actor_id, causation_id, correlation_id "
+            "FROM events "
+            "ORDER BY sequence_no ASC"
+        )
+        all_rows = cur.fetchall()
+
+    entity_replayed = 0
+    evidence_replayed = 0
+    for row in all_rows:
+        event_type = row[1]
+        if event_type == "entity.created":
+            payload = EntityCreatedPayload(**row[4])
+            event = Event(
+                event_id=row[0],
+                event_type=row[1],
+                aggregate_type=row[2],
+                aggregate_id=row[3],
+                payload=payload,
+                schema_version=row[5],
+                occurred_at=row[6],
+                recorded_at=row[7],
+                actor_type=row[8],
+                actor_id=row[9],
+                causation_id=row[10],
+                correlation_id=row[11],
+            )
+            project_entity_created(conn, event)
+            entity_replayed += 1
+        elif event_type == "evidence.raw_ingested":
+            payload = EvidenceRawIngestedPayload(**row[4])
+            event = Event(
+                event_id=row[0],
+                event_type=row[1],
+                aggregate_type=row[2],
+                aggregate_id=row[3],
+                payload=payload,
+                schema_version=row[5],
+                occurred_at=row[6],
+                recorded_at=row[7],
+                actor_type=row[8],
+                actor_id=row[9],
+                causation_id=row[10],
+                correlation_id=row[11],
+            )
+            project_evidence_raw_ingested(conn, event)
+            evidence_replayed += 1
+        # WARNING: when a new event type lands, add another `elif` branch
+        # here. The replay-dispatch contract is held inline; there is
+        # intentionally no registry / dispatcher to enforce completeness.
+
+    assert entity_replayed == entity_count_before
+    assert evidence_replayed == evidence_count_before
+
+    # 6. Event-type counts unchanged after replay.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM events WHERE event_type = 'entity.created'"
+        )
+        assert cur.fetchone()[0] == entity_count_before
+        cur.execute(
+            "SELECT count(*) FROM events "
+            "WHERE event_type = 'evidence.raw_ingested'"
+        )
+        assert cur.fetchone()[0] == evidence_count_before
+
+    # 7. Re-hash both projections; both must match originals byte-equal.
+    entities_hash_after = _snapshot_entities_hash(conn)
+    evidence_hash_after = _snapshot_evidence_raw_hash(conn)
+    assert entities_hash_after == entities_hash_before, (
+        "Step 9 combined-replay invariant violated: entities projection "
+        "diverged after combined wipe + interleaved replay.\n"
+        f"  before: {entities_hash_before}\n"
+        f"  after:  {entities_hash_after}"
+    )
+    assert evidence_hash_after == evidence_hash_before, (
+        "Step 9 combined-replay invariant violated: evidence_raw "
+        "projection diverged after combined wipe + interleaved replay.\n"
+        f"  before: {evidence_hash_before}\n"
+        f"  after:  {evidence_hash_after}"
     )
