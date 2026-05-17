@@ -2,7 +2,7 @@
 
 **Read this first in any new session before doing work.**
 **Workspace mount (Cowork):** `C:\Users\luxco\Tru-find-ai-MVP` — request via `mcp__cowork__request_cowork_directory` at the start of every new Cowork thread before reading any artifact.
-**Last updated:** 2026-05-15 (Day-1 substrate proof landed; Blueprint §22 Test 1 passing live)
+**Last updated:** 2026-05-17 (Day-1 substrate Steps 2–11 landed; four-projection chain operational; Blueprint §22 Tests 1 + 2 passing live; 124/124 tests; HEAD `fff4543`)
 
 ---
 
@@ -40,6 +40,8 @@ Identity layer recognized but on hold during Phase 0 build. No active content pr
 - **Analyst overrides are new records/events, never mutations.** Original observations preserved with `invalidated_by_override_id`.
 - **Confidence is exposed, not hidden.** Low indicator coverage caps the recommendation tier regardless of probability.
 - **Recommendation tier is derived, not stored.** It is a function of latest scoring run + thresholds, computed at view time.
+- **Substrate event chain (post-Blueprint-§8 expansion).** `events → entities → evidence_raw → evidence_derived → compliance_state`. Architectural intent: **events → observations → inferences → policy interpretations** — NOT events → enforcement/actions. The substrate records what was claimed; downstream consumers decide what to do with it. compliance_state assertions are replayable historical interpretations under a specific `(policy_id, policy_version)` and evidence context, NOT canonical objective truth. Re-evaluating against today's policy is a different question from what the policy said at assertion time; the substrate preserves both by recording `(policy_id, policy_version, parent_derived_evidence_ids, assertion)` verbatim.
+- **Soft-pointer / no-FK-between-mutable-projections discipline.** Every mutable projection's foreign-key surface is restricted to `created_event_id REFERENCES events(event_id)` (provenance to the immutable source-of-truth). Cross-projection pointers (`subject_entity_id`, `parent_evidence_ids`, `parent_derived_evidence_ids`) are **soft pointers**: same UUID column type, but no DB-level FK constraint. This preserves evidence-before-entity / DNC-before-entity workflows and avoids FK-ordering traps during replay. Dangling-reference detection is a downstream auditor concern, not a substrate concern.
 
 ## Phase 0 — LOCKED scope
 
@@ -54,7 +56,7 @@ Full lock list: `03_PREQUAL_ENGINE/Phase_0_Freeze_Boundary.md`.
 
 ## Current Phase 0 status
 
-**Day-1 substrate proof LANDED (2026-05-15). Blueprint §22 Test 1 passing live. Append-only event substrate operational.**
+**Day-1 substrate FULLY LANDED (2026-05-15 → 2026-05-17). Four-projection substrate chain operational: `events → entities → evidence_raw → evidence_derived → compliance_state`. Blueprint §22 Test 1 (append-only enforcement, live) + Test 2 (replay determinism across all four projections, live) passing. 124/124 tests passing. HEAD `fff4543`; tag `day-1-step-11-compliance-state-projection-verified`.**
 
 ### Builder model (locked 2026-05-14 evening)
 
@@ -69,24 +71,27 @@ Implementation discipline: err on the side of caution. Replayability, provenance
 1. **A1 Garage flagship deliverables location pending** — two files need manual copy from a prior session once a canonical destination is defined. Not blocking the Phase 0 build.
 2. **Validation oracle for engine v0.2** — to be defined when v0.2 is planned (consistent with the GR-4 Option A ruling: future calibration/dataset language remains explicitly undefined until formally materialized). Not blocking the v0.1.0 Phase 0 build.
 3. **Reconciliation-doc remaining items** — D3 (canonical release paths), D4 (entity naming: "A1 Garage" vs "AI Garage"), D5 (bare "TSA-FRAG" reference in Freeze Boundary §C + other nonexistent references), D6 (§1 → §5 citation), C2 (Blueprint §§4/5 don't list FastAPI / API module), DR-01…DR-15 drift-risk catalog. Source of truth: `03_PREQUAL_ENGINE/Phase_0_Governance_Reconciliation.md` "Remaining unresolved items". Note: item #1 in that section is partly stale — the F-H4/F-H5 alignment edits to Freeze Boundary §A have already landed (denominator=3; append-only=`events`-only). None of these items affect Day-1 scope.
+4. **Plain `Union` → Pydantic `Discriminator` upgrade.** Step-8-flagged deferral. Still defensible at four payload types via the disjoint-required-fields invariant + the Event `model_validator` that enforces type-payload pairing and aggregate_id identity. Re-evaluate when a fifth payload type lands (likely candidate: `entity.attribute_set` per Blueprint §8).
+5. **DDL bypass paths.** `DROP TABLE events`, `ALTER TABLE events DROP CONSTRAINT`, `ALTER TABLE events DISABLE TRIGGER` are not blocked by the substrate. Mitigation needs a DML-only application DB role; current docker-compose grants the `trusignal` user effective superuser on its own DB.
+6. **Docker Compose `version: "3.9"`** in `docker-compose.yml` is treated as deprecated by Compose v2 (warning on every `docker compose` invocation). One-line removal.
+7. **Python ignore patterns missing from `.gitignore`.** `__pycache__/`, `.venv-substrate/`, `*.egg-info/`, `.pytest_cache/` are not in `.gitignore` (template is Node-style). They accumulate as untracked-noise after pytest runs.
+8. **Test DB isolation.** Tests use the `trusignal` substrate DB with rollback-based per-test isolation. A dedicated `trusignal_test` DB (or schema) is the future-hygiene direction.
+9. **Indexes deferred (anti-cathedral).** No B-tree or GIN indexes on `subject_entity_id`, `content_hash`, `parent_evidence_ids`, `parent_derived_evidence_ids`, `derivation_type` / `derivation_version`, `policy_id` / `policy_version`. Add when concrete query patterns demand.
 
 Technical decisions locked: Postgres 15+, MinIO via docker-compose, Typer for CLI, Pydantic v2.
 
 ## Next action
 
-**Open the implementation thread: `TruSignalAI Phase 0 — Week 1 Build`.**
+**Substrate at a clean post-Step-11 checkpoint.** Four projection layers live; replay determinism proven byte-stable across all four via single-pass sequence_no-ordered events scan + inline `if/elif/elif/elif` dispatch (no replay framework). 124/124 tests passing. Pushed to `origin/main`.
 
-In that thread, begin Day 1 substrate proof:
-1. Repo bootstrap (pyproject.toml, docker-compose.yml with Postgres 15 + MinIO).
-2. Migration 001: `events` table + append-only trigger function + trigger.
-3. Smoke test: insert event, verify INSERT works; attempt UPDATE/DELETE, verify exceptions raised.
-4. `app/events/` package: emitter function, Pydantic model for `entity.created`.
-5. `app/entities/` package: projector for `entity.created`, projection to `entities` table.
-6. The 30-minute Day-1 replay test: emit `entity.created` → project to `entities` → snapshot row hash → TRUNCATE entities → replay the event → verify identical row hash.
+**No next step authorized yet.** Likely future directions surfaced during the Step-4-to-Step-11 sequence but not authorized:
 
-If the Day-1 replay test passes, Day 1 is complete and replayability discipline is on solid footing. If it fails, fix the root cause before any further work.
+- Additional Blueprint §8 minimum event types not yet landed: `entity.attribute_set`, `entity.domain_registered`, `ontology.version_loaded`, `engine.version_loaded`, `indicator.observed`, `indicator.analyst_set`, `scoring.run_completed`.
+- Post-§8 substrate expansion already underway (compliance_state); natural continuation: indicator-layer or scoring-lineage event types riding on top of the existing chain.
+- Substrate-hygiene carry-forward items (see "Soft (non-blocking) open items" #4–#9).
+- DDL-level substrate hardening (DML-only DB role).
 
-This thread (current) is the pre-build hardening thread. Closed.
+Any of the above requires explicit executive-operator authorization before implementation.
 
 ## Pre-build hardening artifacts (2026-05-14 evening)
 
@@ -134,15 +139,62 @@ The memory index `MEMORY.md` (in the Claude memory directory) loads automaticall
 - **State on disk:** new files: root `pyproject.toml`, `docker-compose.yml`, `app/` with 7 sub-packages (six empty + `db/` populated), `tests/test_events_append_only.py`. Substrate Postgres on host port 5433 (backend retains 5432). MinIO on 9000/9001.
 - **Checkpoint tag:** `day-1-substrate-proof` (created at the closeout commit).
 
-### Next-session resume
+### 2026-05-15 → 2026-05-17 — Day-1 substrate chain fully landed (Steps 4–11)
+
+**Substrate chain (live):** `events → entities → evidence_raw → evidence_derived → compliance_state`. Four mutable projections, one append-only event log, no replay framework.
+
+**Tag chain (linear, no gaps):**
+- `day-1-substrate-proof` — `99548b7` — Steps 2 + 3 (events table + append-only triggers + bootstrap)
+- `day-1-step-4-emitter-verified` — `147a6de` — Step 4 (Pydantic event model + emitter)
+- `day-1-step-5-projection-verified` — `84fe2cf` — Step 5 (entities mutable projection + projector)
+- `day-1-step-6-replay-verified` — `5179577` — Step 6 (replay-determinism proof for entities)
+- `day-1-step-7-pytest-hygiene-verified` — `5405b5e` — Step 7 (`testpaths = ["tests"]` to scope bare pytest to substrate)
+- `day-1-step-8-evidence-hardened` — `3b38564` — Step 8 (`evidence.raw_ingested` event type + emitter + hardening: model_validator enforces type-payload pairing AND aggregate_id ↔ payload identity for all event types)
+- `day-1-step-9-evidence-projection-verified` — `838f2de` — Step 9 (`evidence_raw` mutable projection + projector + combined two-projection replay)
+- `day-1-step-10-evidence-derived-projection-verified` — `40886cb` — Step 10 (`evidence.derived_created` + `evidence_derived` projection with multi-parent `UUID[]` provenance + three-projection combined replay; pre-commit corrections: `parent_evidence_ids` `min_length=1` per Blueprint §10/§11, `derivation_version` naming consistency)
+- **`day-1-step-11-compliance-state-projection-verified` — `fff4543`** (HEAD) — Step 11 (`compliance.state_asserted` + `compliance_state` projection; new `app/compliance/` sub-package; four-projection combined replay; doctrine: replayable historical interpretations, not objective truth)
+
+**Architectural invariants now structurally enforced:**
+- Append-only enforcement strictly on `events` (D2 / F-H5). Trigger-protected against UPDATE, DELETE, TRUNCATE. FK refusal from each projection's `created_event_id` reinforces TRUNCATE refusal independently.
+- Replay-determinism contract per Governance & Replayability Part B: all UUIDs and timestamps emitter-supplied; projectors are pure functions of `(event.payload, event.event_id, event.occurred_at)`; no `datetime.now`, `uuid.uuid4`, `random`, `os.environ`, `open(`, `requests`, `httpx` in any projector — verified by static source-grep tests embedded in each projector test file.
+- `json.dumps(sort_keys=True, default=str)` for all JSONB serialization (Mistake #7 prevention).
+- `frozen=True, extra="forbid"` on all payloads and the Event envelope.
+- Pydantic `model_validator` on `Event` enforces type-payload pairing AND `aggregate_id == payload.<identity_field>` for all four event types.
+- Multi-parent provenance: `parent_evidence_ids` (evidence_derived) and `parent_derived_evidence_ids` (compliance_state) are `UUID[]` with order preservation end-to-end (emit → JSONB → SELECT → projection); non-empty enforced via Pydantic `min_length=1` per Blueprint §10/§11 / Step-11 doctrine.
+- Soft-pointer / no-FK between mutable projections (see Active architecture decisions, locked).
+- Replay-dispatch is inline `if/elif/.../elif` over event_type — no registry, no dispatcher, no replay engine, no framework. Manual maintenance contract carried in WARNING-comment docstrings on each per-type replay helper and at the dispatch point of the combined replay test.
+
+**Verified live:**
+- 124/124 tests pass via both `python -m pytest -v` (testpaths-scoped) and `python -m pytest tests/ -v` (explicit path).
+- Combined four-projection replay-determinism test (`test_replay_rebuilds_all_four_projections_after_combined_wipe`): emit interleaved entity → raw → derived → compliance events spanning the full chain, snapshot all four projection hashes, DELETE all four projections, replay via single sequence_no-ordered pass with four-way inline dispatch, re-snapshot all four → byte-equal hashes confirmed.
+- Append-only enforcement live: INSERT allowed; UPDATE / DELETE / TRUNCATE rejected (P0001 + FK planner refusal).
+- Schema-pin tests live on all three mutable projections asserting expected column sets and the absence of auxiliary `metadata` columns (event-payload-only access pattern).
+
+**Scope discipline preserved across all eight steps:**
+- Legacy `backend/` untouched (verified at each commit via `git diff HEAD -- backend/ infra/ docs/ 03_PREQUAL_ENGINE/ ontology_releases/ engine_releases/`).
+- No DNC enforcement / compliance state machine / scoring / indicators / reporting / Sara / UI / automation / replay-framework / registry / dispatcher code introduced.
+- One executive-operator-approved Blueprint §5 expansion: new `app/compliance/` sub-package (8th, beyond the locked 7). All other code respects Blueprint §5's locked layout.
+- All commits reference the Blueprint sections they implement; each step landed as its own commit + annotated tag.
+
+### Next-session resume (post-Step-11, post-push)
 
 1. Mount `C:\Users\luxco\Tru-find-ai-MVP` via `mcp__cowork__request_cowork_directory`.
 2. Read this brief end-to-end.
-3. Bring substrate services up: `docker compose up -d`; verify health with `docker compose ps`. Activate the substrate venv: `.\.venv-substrate\Scripts\Activate.ps1`.
-4. Confirm substrate state still valid: `python -c "from app.db import connection; print(connection.bootstrap())"` should return `[]` (idempotent — substrate already bootstrapped).
-5. **Resume at Day-1 Step 4:** Pydantic event-model foundation + emitter.
-   - `app/events/models.py` — base `Event` envelope (matches Blueprint §7 events-table fields) + first concrete payload model `EntityCreatedPayload` (entity_id, name, vertical, created_at_for_projection). All UUIDs and timestamps emitter-supplied per Governance & Replayability Part B "UUID sourcing rules" and "Timestamp sourcing rules".
-   - `app/events/emitter.py` — single-transaction INSERT into `events`; JSON payload serialized with `sort_keys=True` (Governance Mistake #7 prevention).
-   - Smoke test: emit one `entity.created` event for **A1 Garage Doors** (the canonical archetype per Blueprint §3 and the user's testing instruction). Verify row appears in `events`.
-6. Then Day-1 Steps 5-7: entity projector (`app/entities/projectors.py`) + migration 002 (`entities` mutable projection) → 30-minute replay test (`tests/test_replay_determinism.py`) → Day-1 checkpoint report.
-7. No commits until authorized. Daily closeout before sign-off.
+3. Confirm substrate state on host:
+   - `docker compose ps` — both `trusignal-postgres` and `trusignal-minio` should be Up (healthy). If not: `docker compose up -d` then wait ~10 s.
+   - `.\.venv-substrate\Scripts\Activate.ps1`
+   - `$env:TRUSIGNAL_DATABASE_URL = "postgresql://trusignal:trusignal@localhost:5433/trusignal"`
+   - `python -c "from app.db import connection; print(connection.bootstrap())"` → expect `[]` (idempotent; substrate already bootstrapped through migration 005).
+   - `python -m pytest -v` → expect `124 passed`.
+4. Verify tag chain: `git log --oneline --decorate -n 10` should show all eight `day-1-step-*` tags landing in order from Step 6 (oldest) through Step 11 (HEAD).
+5. **No next step is authorized at this checkpoint.** Wait for executive-operator direction. When direction comes, the established discipline carries over:
+   - Plan reviewed before implementation.
+   - Per-step audit before commit/tag.
+   - Inline `if/elif` replay dispatch only (no framework).
+   - Source-grep guards for any new projector.
+   - `min_length=1` for any new provenance-pointer array per Blueprint §10/§11 spirit.
+   - Soft pointers between mutable projections; FK only to `events`.
+   - `frozen=True, extra="forbid"` on all new payloads.
+   - Substrate doctrine: events → observations → inferences → policy interpretations. Not events → enforcement / actions.
+   - Carry-forward deferrals (above) get addressed when the executive operator authorizes a hygiene-only commit window.
+6. No commits without authorization. Daily closeout before sign-off.
