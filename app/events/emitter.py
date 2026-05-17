@@ -2,10 +2,11 @@
 app.events.emitter — TruSignalAI Phase 0 single-transaction event emitter.
 
 Scope:
-    - Day-1 Step 4 added `emit_entity_created(...)`.
-    - Day-1 Step 8 added `emit_evidence_raw_ingested(...)`.
+    - Day-1 Step 4  added `emit_entity_created(...)`.
+    - Day-1 Step 8  added `emit_evidence_raw_ingested(...)`.
     - Day-1 Step 10 added `emit_evidence_derived_created(...)`.
-    - All three functions follow the same shape: generate event_id,
+    - Day-1 Step 11 added `emit_compliance_state_asserted(...)`.
+    - All four functions follow the same shape: generate event_id,
       occurred_at, recorded_at emitter-side; serialize the typed payload
       to JSONB with deterministic key ordering; INSERT one row into the
       events table inside the caller's transaction.
@@ -48,8 +49,10 @@ from datetime import datetime, timezone
 import psycopg
 
 from app.events.models import (
+    AGGREGATE_TYPE_COMPLIANCE,
     AGGREGATE_TYPE_ENTITY,
     AGGREGATE_TYPE_EVIDENCE,
+    ComplianceStateAssertedPayload,
     EntityCreatedPayload,
     EvidenceDerivedCreatedPayload,
     EvidenceRawIngestedPayload,
@@ -70,6 +73,7 @@ from app.events.models import (
 ENTITY_CREATED_SCHEMA_VERSION: str = "1.0.0"
 EVIDENCE_RAW_INGESTED_SCHEMA_VERSION: str = "1.0.0"
 EVIDENCE_DERIVED_CREATED_SCHEMA_VERSION: str = "1.0.0"
+COMPLIANCE_STATE_ASSERTED_SCHEMA_VERSION: str = "1.0.0"
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +217,63 @@ def emit_evidence_derived_created(
         aggregate_id=payload.derived_evidence_id,
         payload=payload,
         schema_version=EVIDENCE_DERIVED_CREATED_SCHEMA_VERSION,
+        occurred_at=now,
+        recorded_at=now,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        causation_id=causation_id,
+        correlation_id=correlation_id,
+    )
+
+    _insert_event(conn, event)
+    return event
+
+
+def emit_compliance_state_asserted(
+    conn: psycopg.Connection,
+    *,
+    payload: ComplianceStateAssertedPayload,
+    actor_type: str,
+    actor_id: str,
+    causation_id: uuid.UUID | None = None,
+    correlation_id: uuid.UUID | None = None,
+) -> Event:
+    """
+    Emit one `compliance.state_asserted` event for the given payload.
+
+    Generates `event_id`, `occurred_at`, and `recorded_at` here in the
+    emitter; persists the resulting Event into the events table; returns
+    the populated envelope. The aggregate_id is set to
+    payload.compliance_state_id by the compliance.* convention (one
+    assertion, one aggregate; aggregate_id is the compliance_state_id).
+    Linkage to one or more PARENT derived-evidence records is carried in
+    payload.parent_derived_evidence_ids (NON-EMPTY by substrate doctrine)
+    — NOT in the aggregate graph. Linkage to an entity, if any, is
+    carried in payload.subject_entity_id (soft pointer, nullable).
+
+    Doctrine note (Step 11):
+        compliance_state assertions are REPLAYABLE HISTORICAL
+        INTERPRETATIONS made under a specific policy_version and
+        evidence context — NOT canonical objective truth. The emitter
+        records what was asserted verbatim with its policy_version
+        lineage. Replay never re-runs the policy-evaluation logic; it
+        re-projects the stored assertion as-is.
+
+    Transactional contract:
+        - The single INSERT runs inside the caller-supplied connection's
+          current transaction (psycopg autocommit=False default).
+        - The caller is responsible for commit() / rollback().
+    """
+    event_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    event = Event(
+        event_id=event_id,
+        event_type="compliance.state_asserted",
+        aggregate_type=AGGREGATE_TYPE_COMPLIANCE,
+        aggregate_id=payload.compliance_state_id,
+        payload=payload,
+        schema_version=COMPLIANCE_STATE_ASSERTED_SCHEMA_VERSION,
         occurred_at=now,
         recorded_at=now,
         actor_type=actor_type,

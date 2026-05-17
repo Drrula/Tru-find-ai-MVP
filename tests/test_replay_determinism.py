@@ -55,14 +55,17 @@ from datetime import datetime, timezone
 import psycopg
 import pytest
 
+from app.compliance.projectors import project_compliance_state_asserted
 from app.db import connection as db
 from app.entities.projectors import project_entity_created
 from app.events.emitter import (
+    emit_compliance_state_asserted,
     emit_entity_created,
     emit_evidence_derived_created,
     emit_evidence_raw_ingested,
 )
 from app.events.models import (
+    ComplianceStateAssertedPayload,
     EntityCreatedPayload,
     Event,
     EvidenceDerivedCreatedPayload,
@@ -1192,4 +1195,533 @@ def test_replay_rebuilds_all_three_projections_after_combined_wipe(
         "projection diverged after combined wipe + interleaved replay.\n"
         f"  before: {evidence_derived_hash_before}\n"
         f"  after:  {evidence_derived_hash_after}"
+    )
+
+
+# ===========================================================================
+# Step 11 extensions — compliance_state projection replay determinism
+# ===========================================================================
+
+
+_COMPLIANCE_STATE_COLUMNS: tuple[str, ...] = (
+    "compliance_state_id",
+    "subject_entity_id",
+    "parent_derived_evidence_ids",
+    "policy_id",
+    "policy_version",
+    "assertion",
+    "asserted_at_for_projection",
+    "created_event_id",
+    "projected_at",
+)
+
+
+def _snapshot_compliance_state_hash(conn: psycopg.Connection) -> str:
+    """
+    Read compliance_state with a deterministic column list and primary-
+    key sort, serialize via json.dumps(sort_keys=True, default=str), and
+    SHA-256. Mirrors the entities / evidence_raw / evidence_derived
+    snapshot functions for the fourth projection.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT compliance_state_id, subject_entity_id, "
+            "parent_derived_evidence_ids, policy_id, policy_version, "
+            "assertion, asserted_at_for_projection, "
+            "created_event_id, projected_at "
+            "FROM compliance_state "
+            "ORDER BY compliance_state_id"
+        )
+        rows = cur.fetchall()
+    rows_as_dicts = [
+        dict(zip(_COMPLIANCE_STATE_COLUMNS, row)) for row in rows
+    ]
+    serialized = json.dumps(rows_as_dicts, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _emit_a1_compliance_event(
+    conn: psycopg.Connection,
+    *,
+    subject_entity_id: uuid.UUID | None = None,
+    parent_derived_evidence_ids: list[uuid.UUID] | None = None,
+    policy_id: str = "us_dnc_v1",
+    policy_version: str = "1.0.0",
+    assertion: dict | None = None,
+) -> Event:
+    """
+    Emit a synthetic A1 Garage Doors compliance.state_asserted event.
+    Duplicates the canonical fixture in tests/test_compliance_state_*.py
+    intentionally to keep this test module self-contained (no cross-
+    test-module helpers — same discipline as the entity / raw / derived
+    helpers above).
+
+    Default parent_derived_evidence_ids is a single synthetic UUID
+    (substrate doctrine: assertions are evidence-grounded; min_length=1
+    enforced at the Pydantic layer).
+    """
+    if parent_derived_evidence_ids is None:
+        parent_derived_evidence_ids = [uuid.uuid4()]
+    if assertion is None:
+        assertion = {
+            "compliant": False,
+            "blocker": "phone_on_dnc_list",
+            "confidence": 0.92,
+        }
+    payload = ComplianceStateAssertedPayload(
+        compliance_state_id=uuid.uuid4(),
+        subject_entity_id=subject_entity_id,
+        parent_derived_evidence_ids=parent_derived_evidence_ids,
+        policy_id=policy_id,
+        policy_version=policy_version,
+        assertion=assertion,
+        asserted_at_for_projection=datetime.now(timezone.utc),
+    )
+    return emit_compliance_state_asserted(
+        conn, payload=payload, actor_type="analyst", actor_id="andrew",
+    )
+
+
+def _replay_compliance_state_asserted_events(
+    conn: psycopg.Connection,
+) -> int:
+    """
+    Re-read compliance.state_asserted rows from the append-only events
+    table in sequence_no ASC order, reconstruct Event objects, and
+    re-project each through the Step 11 projector. Returns the count
+    projected.
+
+    All UUIDs and timestamps come from the row; nothing is regenerated.
+    The payload JSONB is parsed back into ComplianceStateAssertedPayload
+    by Pydantic. The policy-evaluation logic that originally produced
+    the assertion is NOT re-run; the assertion is recovered verbatim
+    from the stored event.
+
+    WARNING — manual replay-filter maintenance contract:
+        The SQL filter `WHERE event_type = 'compliance.state_asserted'`
+        below is the ONLY mechanism that keeps this helper correct as
+        new event types are added to the log. When a future day adds
+        another event type that MUTATES THE compliance_state PROJECTION
+        (e.g. a hypothetical `compliance.state_revised` or
+        `compliance.state_revoked`), that event type MUST be added to
+        this filter AND the helper extended. Otherwise replay-
+        determinism tests will silently pass — the snapshot hash
+        before/after the wipe-and-replay cycle compares only the
+        events the helper *did* re-apply — while production replay is
+        actually incomplete. The identical contract applies to
+        `_replay_entity_created_events`,
+        `_replay_evidence_raw_ingested_events`, and
+        `_replay_evidence_derived_created_events`.
+
+        As of Step 11, only `compliance.state_asserted` mutates
+        `compliance_state`.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            # WARNING: when a new compliance-affecting event type lands,
+            # extend this WHERE clause (e.g. `event_type IN (...)`) and
+            # add the corresponding projector dispatch below. See the
+            # helper docstring for the full maintenance contract.
+            "SELECT event_id, event_type, aggregate_type, aggregate_id, "
+            "payload, schema_version, occurred_at, recorded_at, "
+            "actor_type, actor_id, causation_id, correlation_id "
+            "FROM events "
+            "WHERE event_type = 'compliance.state_asserted' "
+            "ORDER BY sequence_no ASC"
+        )
+        rows = cur.fetchall()
+
+    count = 0
+    for row in rows:
+        payload = ComplianceStateAssertedPayload(**row[4])
+        event = Event(
+            event_id=row[0],
+            event_type=row[1],
+            aggregate_type=row[2],
+            aggregate_id=row[3],
+            payload=payload,
+            schema_version=row[5],
+            occurred_at=row[6],
+            recorded_at=row[7],
+            actor_type=row[8],
+            actor_id=row[9],
+            causation_id=row[10],
+            correlation_id=row[11],
+        )
+        project_compliance_state_asserted(conn, event)
+        count += 1
+    return count
+
+
+def test_replay_rebuilds_compliance_state_projection_deterministically(
+    conn: psycopg.Connection,
+) -> None:
+    """
+    Step 11 proof — mirror of the Step 6/9/10 replay tests applied to
+    the new compliance_state projection. Clearing compliance_state and
+    rebuilding from the append-only events log produces a byte-identical
+    projection state.
+
+    DOCTRINE: the replay path does NOT re-run the policy-evaluation
+    logic that produced the assertion — it recovers the assertion
+    verbatim from the stored event and writes it back to the
+    projection. compliance_state assertions are REPLAYABLE HISTORICAL
+    INTERPRETATIONS, not canonical objective truth; replay preserves
+    what was asserted at the time, under which policy_version, and
+    against which derived-evidence context.
+    """
+    # 1. Emit one compliance.state_asserted with a fixed-order
+    #    parent_derived_evidence_ids list to exercise the order-
+    #    preservation contract under replay.
+    parents = [uuid.uuid4(), uuid.uuid4(), uuid.uuid4()]
+    compliance_event = _emit_a1_compliance_event(
+        conn,
+        parent_derived_evidence_ids=parents,
+        policy_version="2024-Q1",
+        assertion={
+            "compliant": False,
+            "blocker": "replay-determinism fixture",
+            "verdict_at_assertion_time": "non_compliant",
+        },
+    )
+
+    # 2. Project via the Step 11 projector.
+    project_compliance_state_asserted(conn, compliance_event)
+
+    # 3. Snapshot + hash — the "expected" state.
+    hash_before = _snapshot_compliance_state_hash(conn)
+
+    # 4a. Capture event count so we can prove the event log is untouched.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM events "
+            "WHERE event_type = 'compliance.state_asserted'"
+        )
+        events_count_before = cur.fetchone()[0]
+    assert events_count_before >= 1
+
+    # 4b. Clear ONLY the mutable compliance_state projection.
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM compliance_state")
+        cur.execute("SELECT count(*) FROM compliance_state")
+        assert cur.fetchone()[0] == 0
+
+    # 5. Rebuild from events.
+    rebuilt_count = _replay_compliance_state_asserted_events(conn)
+    assert rebuilt_count == events_count_before
+
+    # 5a. Event log unchanged.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM events "
+            "WHERE event_type = 'compliance.state_asserted'"
+        )
+        events_count_after = cur.fetchone()[0]
+    assert events_count_after == events_count_before
+
+    # 6. Re-hash and assert byte-equal.
+    hash_after = _snapshot_compliance_state_hash(conn)
+    assert hash_after == hash_before, (
+        "Step 11 invariant violated: rebuilt compliance_state snapshot "
+        "does not hash to the same value as the original projection.\n"
+        f"  before: {hash_before}\n"
+        f"  after:  {hash_after}"
+    )
+
+    # 7. Explicit parent_derived_evidence_ids order check under replay
+    #    (belt and suspenders on top of the hash equality).
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT parent_derived_evidence_ids FROM compliance_state "
+            "WHERE compliance_state_id = %s",
+            (compliance_event.payload.compliance_state_id,),
+        )
+        replayed_parents = cur.fetchone()[0]
+    assert replayed_parents == parents, (
+        "parent_derived_evidence_ids order was NOT preserved under "
+        f"replay.\n  emitted:  {parents}\n  replayed: {replayed_parents}"
+    )
+
+
+def test_replay_rebuilds_all_four_projections_after_combined_wipe(
+    conn: psycopg.Connection,
+) -> None:
+    """
+    Step 11 combined-projection invariant: with all FOUR projection
+    tables populated from a mixed, interleaved event log spanning the
+    full substrate chain
+    (events → entities + evidence_raw + evidence_derived +
+    compliance_state), wiping all four projections and replaying via a
+    SINGLE sequence_no-ordered pass with inline if/elif/elif/elif
+    dispatch rebuilds all four projections byte-identical.
+
+    Replay-dispatch discipline:
+        - Single SELECT across all event types, ordered by sequence_no.
+        - Inline if/elif/elif/elif branching on event_type. NO registry,
+          NO dispatcher, NO generalized engine, NO helper extraction
+          beyond what already exists in this test module.
+        - When a future event type lands, add another `elif` branch
+          here AND (if it mutates a projection) extend the relevant
+          per-type replay helper. Both are manual contracts held by
+          the test author at the point of adding the new event type.
+
+    DOCTRINE: compliance assertions are REPLAYABLE HISTORICAL
+    INTERPRETATIONS — they are recovered verbatim from the event log,
+    NOT re-evaluated against today's policy. The substrate preserves
+    what was asserted at assertion time.
+    """
+    # 1. Emit multiple interleaved events spanning all four projection
+    #    types, threading provenance through the canonical chain:
+    #      entity#1 → raw#1 → derived#1(parent=raw#1) →
+    #      compliance#1(parent=derived#1) →
+    #      entity#2 → raw#2 → derived#2(parents=[raw#1, raw#2]) →
+    #      compliance#2(parents=[derived#1, derived#2])
+    entity_event_1 = _emit_a1_event(conn)
+    project_entity_created(conn, entity_event_1)
+
+    raw_event_1 = _emit_a1_evidence_event(
+        conn, subject_entity_id=entity_event_1.payload.entity_id,
+    )
+    project_evidence_raw_ingested(conn, raw_event_1)
+
+    derived_event_1 = _emit_a1_derived_event(
+        conn,
+        subject_entity_id=entity_event_1.payload.entity_id,
+        parent_evidence_ids=[raw_event_1.payload.evidence_id],
+    )
+    project_evidence_derived_created(conn, derived_event_1)
+
+    compliance_event_1 = _emit_a1_compliance_event(
+        conn,
+        subject_entity_id=entity_event_1.payload.entity_id,
+        parent_derived_evidence_ids=[derived_event_1.payload.derived_evidence_id],
+    )
+    project_compliance_state_asserted(conn, compliance_event_1)
+
+    entity_event_2 = _emit_a1_event(conn)
+    project_entity_created(conn, entity_event_2)
+
+    raw_event_2 = _emit_a1_evidence_event(
+        conn, subject_entity_id=entity_event_2.payload.entity_id,
+    )
+    project_evidence_raw_ingested(conn, raw_event_2)
+
+    derived_event_2 = _emit_a1_derived_event(
+        conn,
+        subject_entity_id=entity_event_2.payload.entity_id,
+        parent_evidence_ids=[
+            raw_event_1.payload.evidence_id,
+            raw_event_2.payload.evidence_id,
+        ],
+    )
+    project_evidence_derived_created(conn, derived_event_2)
+
+    compliance_event_2 = _emit_a1_compliance_event(
+        conn,
+        subject_entity_id=entity_event_2.payload.entity_id,
+        parent_derived_evidence_ids=[
+            derived_event_1.payload.derived_evidence_id,
+            derived_event_2.payload.derived_evidence_id,
+        ],
+    )
+    project_compliance_state_asserted(conn, compliance_event_2)
+
+    # 2. Snapshot ALL FOUR projections.
+    entities_hash_before = _snapshot_entities_hash(conn)
+    evidence_raw_hash_before = _snapshot_evidence_raw_hash(conn)
+    evidence_derived_hash_before = _snapshot_evidence_derived_hash(conn)
+    compliance_state_hash_before = _snapshot_compliance_state_hash(conn)
+
+    # 3. Capture all four event-type counts.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM events WHERE event_type = 'entity.created'"
+        )
+        entity_count_before = cur.fetchone()[0]
+        cur.execute(
+            "SELECT count(*) FROM events "
+            "WHERE event_type = 'evidence.raw_ingested'"
+        )
+        raw_count_before = cur.fetchone()[0]
+        cur.execute(
+            "SELECT count(*) FROM events "
+            "WHERE event_type = 'evidence.derived_created'"
+        )
+        derived_count_before = cur.fetchone()[0]
+        cur.execute(
+            "SELECT count(*) FROM events "
+            "WHERE event_type = 'compliance.state_asserted'"
+        )
+        compliance_count_before = cur.fetchone()[0]
+    assert entity_count_before >= 2
+    assert raw_count_before >= 2
+    assert derived_count_before >= 2
+    assert compliance_count_before >= 2
+
+    # 4. Wipe ALL FOUR projections. Most-downstream first
+    #    (compliance_state → evidence_derived → evidence_raw →
+    #    entities). Events untouched.
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM compliance_state")
+        cur.execute("DELETE FROM evidence_derived")
+        cur.execute("DELETE FROM evidence_raw")
+        cur.execute("DELETE FROM entities")
+        cur.execute("SELECT count(*) FROM compliance_state")
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT count(*) FROM evidence_derived")
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT count(*) FROM evidence_raw")
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT count(*) FROM entities")
+        assert cur.fetchone()[0] == 0
+
+    # 5. Single sequence_no-ordered pass with inline if/elif/elif/elif
+    #    dispatch.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT event_id, event_type, aggregate_type, aggregate_id, "
+            "payload, schema_version, occurred_at, recorded_at, "
+            "actor_type, actor_id, causation_id, correlation_id "
+            "FROM events "
+            "ORDER BY sequence_no ASC"
+        )
+        all_rows = cur.fetchall()
+
+    entity_replayed = 0
+    raw_replayed = 0
+    derived_replayed = 0
+    compliance_replayed = 0
+    for row in all_rows:
+        event_type = row[1]
+        if event_type == "entity.created":
+            payload = EntityCreatedPayload(**row[4])
+            event = Event(
+                event_id=row[0],
+                event_type=row[1],
+                aggregate_type=row[2],
+                aggregate_id=row[3],
+                payload=payload,
+                schema_version=row[5],
+                occurred_at=row[6],
+                recorded_at=row[7],
+                actor_type=row[8],
+                actor_id=row[9],
+                causation_id=row[10],
+                correlation_id=row[11],
+            )
+            project_entity_created(conn, event)
+            entity_replayed += 1
+        elif event_type == "evidence.raw_ingested":
+            payload = EvidenceRawIngestedPayload(**row[4])
+            event = Event(
+                event_id=row[0],
+                event_type=row[1],
+                aggregate_type=row[2],
+                aggregate_id=row[3],
+                payload=payload,
+                schema_version=row[5],
+                occurred_at=row[6],
+                recorded_at=row[7],
+                actor_type=row[8],
+                actor_id=row[9],
+                causation_id=row[10],
+                correlation_id=row[11],
+            )
+            project_evidence_raw_ingested(conn, event)
+            raw_replayed += 1
+        elif event_type == "evidence.derived_created":
+            payload = EvidenceDerivedCreatedPayload(**row[4])
+            event = Event(
+                event_id=row[0],
+                event_type=row[1],
+                aggregate_type=row[2],
+                aggregate_id=row[3],
+                payload=payload,
+                schema_version=row[5],
+                occurred_at=row[6],
+                recorded_at=row[7],
+                actor_type=row[8],
+                actor_id=row[9],
+                causation_id=row[10],
+                correlation_id=row[11],
+            )
+            project_evidence_derived_created(conn, event)
+            derived_replayed += 1
+        elif event_type == "compliance.state_asserted":
+            payload = ComplianceStateAssertedPayload(**row[4])
+            event = Event(
+                event_id=row[0],
+                event_type=row[1],
+                aggregate_type=row[2],
+                aggregate_id=row[3],
+                payload=payload,
+                schema_version=row[5],
+                occurred_at=row[6],
+                recorded_at=row[7],
+                actor_type=row[8],
+                actor_id=row[9],
+                causation_id=row[10],
+                correlation_id=row[11],
+            )
+            project_compliance_state_asserted(conn, event)
+            compliance_replayed += 1
+        # WARNING: when a new event type lands, add another `elif` branch
+        # here. The replay-dispatch contract is held inline; there is
+        # intentionally no registry / dispatcher to enforce completeness.
+
+    assert entity_replayed == entity_count_before
+    assert raw_replayed == raw_count_before
+    assert derived_replayed == derived_count_before
+    assert compliance_replayed == compliance_count_before
+
+    # 6. All four event-type counts unchanged after replay.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM events WHERE event_type = 'entity.created'"
+        )
+        assert cur.fetchone()[0] == entity_count_before
+        cur.execute(
+            "SELECT count(*) FROM events "
+            "WHERE event_type = 'evidence.raw_ingested'"
+        )
+        assert cur.fetchone()[0] == raw_count_before
+        cur.execute(
+            "SELECT count(*) FROM events "
+            "WHERE event_type = 'evidence.derived_created'"
+        )
+        assert cur.fetchone()[0] == derived_count_before
+        cur.execute(
+            "SELECT count(*) FROM events "
+            "WHERE event_type = 'compliance.state_asserted'"
+        )
+        assert cur.fetchone()[0] == compliance_count_before
+
+    # 7. Re-hash all four projections; all must match originals byte-equal.
+    entities_hash_after = _snapshot_entities_hash(conn)
+    evidence_raw_hash_after = _snapshot_evidence_raw_hash(conn)
+    evidence_derived_hash_after = _snapshot_evidence_derived_hash(conn)
+    compliance_state_hash_after = _snapshot_compliance_state_hash(conn)
+    assert entities_hash_after == entities_hash_before, (
+        "Step 11 four-way replay invariant violated: entities projection "
+        "diverged after combined wipe + interleaved replay.\n"
+        f"  before: {entities_hash_before}\n"
+        f"  after:  {entities_hash_after}"
+    )
+    assert evidence_raw_hash_after == evidence_raw_hash_before, (
+        "Step 11 four-way replay invariant violated: evidence_raw "
+        "projection diverged after combined wipe + interleaved replay.\n"
+        f"  before: {evidence_raw_hash_before}\n"
+        f"  after:  {evidence_raw_hash_after}"
+    )
+    assert evidence_derived_hash_after == evidence_derived_hash_before, (
+        "Step 11 four-way replay invariant violated: evidence_derived "
+        "projection diverged after combined wipe + interleaved replay.\n"
+        f"  before: {evidence_derived_hash_before}\n"
+        f"  after:  {evidence_derived_hash_after}"
+    )
+    assert compliance_state_hash_after == compliance_state_hash_before, (
+        "Step 11 four-way replay invariant violated: compliance_state "
+        "projection diverged after combined wipe + interleaved replay.\n"
+        f"  before: {compliance_state_hash_before}\n"
+        f"  after:  {compliance_state_hash_after}"
     )

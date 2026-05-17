@@ -44,12 +44,14 @@ EventType = Literal[
     "entity.created",
     "evidence.raw_ingested",
     "evidence.derived_created",
+    "compliance.state_asserted",
 ]
 """
 Phase 0 event-type discriminator. Day-1 Step 4 introduced `entity.created`;
 Day-1 Step 8 added `evidence.raw_ingested`; Day-1 Step 10 added
-`evidence.derived_created`. Subsequent days extend this toward the full
-Blueprint §8 minimum set.
+`evidence.derived_created`; Day-1 Step 11 added `compliance.state_asserted`
+(post-Blueprint-§8 substrate expansion). Subsequent days may extend further
+toward the full Blueprint §8 minimum set and beyond.
 """
 
 
@@ -70,6 +72,17 @@ evidence.raw_ingested event is the evidence_id itself (by convention
 enforced in the emitter). Each evidence record is its own aggregate;
 linkage to an entity is carried as `subject_entity_id` in the payload,
 not as aggregate-graph membership.
+"""
+
+AGGREGATE_TYPE_COMPLIANCE: str = "compliance"
+"""
+Aggregate type for compliance.* events. The aggregate_id of a
+compliance.state_asserted event is the compliance_state_id itself (by
+convention enforced in the emitter). Each compliance assertion is its
+own aggregate; linkage to an entity is carried as `subject_entity_id`
+(soft pointer, nullable), and linkage to derived-evidence parents is
+carried as `parent_derived_evidence_ids` (soft pointers, non-empty) —
+neither is aggregate-graph membership.
 """
 
 
@@ -280,6 +293,116 @@ class EvidenceDerivedCreatedPayload(BaseModel):
     derived_at_for_projection: datetime
 
 
+class ComplianceStateAssertedPayload(BaseModel):
+    """
+    Payload for `compliance.state_asserted` events.
+
+    DOCTRINE — replayable historical interpretation, not objective truth:
+        compliance_state records POLICY/RISK ASSERTIONS made under a
+        specific policy version and evidence context. Assertions are
+        REPLAYABLE HISTORICAL INTERPRETATIONS, NOT canonical objective
+        truth. The substrate does not enforce policy semantics; it
+        records WHAT was asserted at the time the assertion was made,
+        UNDER WHICH policy version, AGAINST WHICH derived-evidence
+        context. Re-evaluating against today's policy is a DIFFERENT
+        question from what the policy SAID at assertion time, and the
+        substrate preserves both possibilities by recording
+        (policy_id, policy_version, parent_derived_evidence_ids,
+        assertion) verbatim.
+
+    Replay-determinism contract:
+        - The assertion is recorded VERBATIM in events.payload and
+          materialized VERBATIM into compliance_state.assertion.
+        - Replay NEVER re-runs the policy-evaluation / classifier / LLM
+          / rules-engine logic that produced the assertion. The
+          producing logic lives outside the substrate.
+        - `policy_version` records which version of the policy produced
+          this assertion so future audit / explainability /
+          re-evaluation code can identify the producing version even if
+          the policy itself has since evolved.
+
+    Fields:
+        compliance_state_id          — stable UUID for the assertion.
+                                       Aggregate convention:
+                                       aggregate_id == compliance_state_id,
+                                       enforced by the Event validator.
+        subject_entity_id            — optional UUID linking the assertion
+                                       to an entity. Nullable; soft
+                                       pointer (no FK at any layer).
+                                       Mirrors the evidence_raw /
+                                       evidence_derived discipline so
+                                       compliance assertions made BEFORE
+                                       the entity exists in the substrate
+                                       (e.g. DNC-before-entity) are
+                                       expressible.
+        parent_derived_evidence_ids  — non-empty list[UUID] of soft
+                                       pointers to evidence_derived rows
+                                       that informed this assertion.
+                                       ORDER IS PRESERVED end-to-end.
+                                       Non-empty per Step-11 substrate
+                                       doctrine: compliance assertions
+                                       must be grounded in at least one
+                                       derived-evidence parent.
+                                       Enforced at the Pydantic layer
+                                       via min_length=1. NO FK on the
+                                       elements — provenance is by
+                                       convention at this layer.
+        policy_id                    — discriminator string identifying
+                                       the policy under which this
+                                       assertion was made (e.g.
+                                       "us_dnc_v1", "gdpr_consent").
+                                       Free-form at this layer; future
+                                       projections may constrain.
+        policy_version               — version of the policy at the time
+                                       of assertion (e.g. "1.0.0",
+                                       "2024-Q1"). Required for replay-
+                                       explainability and historical-
+                                       interpretation reconstruction.
+        assertion                    — the actual policy/risk claim,
+                                       JSON-compatible dict[str, Any].
+                                       PROJECTION SUBSTANCE, NOT
+                                       auxiliary metadata — materialized
+                                       in compliance_state.assertion.
+                                       Replay recovers it verbatim.
+        asserted_at_for_projection   — logical assertion time. The
+                                       compliance_state projector writes
+                                       this directly into the projection;
+                                       the projector never reads the
+                                       clock.
+
+    Out of scope (NOT here):
+        - The policy-evaluation logic itself (rules engine, classifier,
+          LLM client, prompt template). All runs OUTSIDE the substrate.
+        - Storage backend for assertions that exceed JSONB-reasonable
+          size.
+        - Cross-projection consistency checks against
+          parent_derived_evidence_ids. The substrate emits/projects
+          faithfully; consistency is a consumer concern.
+        - Auxiliary evaluator metadata (evaluator runtime, retry count,
+          audit signatures, prompt template id) belongs in
+          events.payload alongside the envelope, NOT in
+          compliance_state. The projector keeps compliance_state narrow
+          to the projection-substance fields.
+        - Enforcement, action, automation, Sara/UI, reporting,
+          downstream scoring — all are CONSUMERS of compliance_state,
+          NOT producers.
+
+    Pydantic config:
+        - frozen=True       — payload is immutable after construction.
+        - extra="forbid"    — unknown fields raise (Mistake #8 prevention).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    compliance_state_id: uuid.UUID
+    subject_entity_id: uuid.UUID | None = None
+    parent_derived_evidence_ids: list[uuid.UUID] = Field(..., min_length=1)
+    policy_id: str = Field(..., min_length=1)
+    policy_version: str = Field(..., min_length=1)
+    assertion: dict[str, Any]
+    asserted_at_for_projection: datetime
+
+
 # ---------------------------------------------------------------------------
 # Event envelope (Blueprint §7 column set, emitter-supplied subset)
 # ---------------------------------------------------------------------------
@@ -299,12 +422,13 @@ class Event(BaseModel):
     Day-1 Step 8 widened `payload` from the single `EntityCreatedPayload`
     to a plain Union over `EntityCreatedPayload | EvidenceRawIngestedPayload`.
     Day-1 Step 10 extended that Union to three members by adding
-    `EvidenceDerivedCreatedPayload`. Plain Union (not a Pydantic
-    discriminated union) is sufficient because every payload type has a
-    strictly disjoint required-field set from every other and all use
-    `extra="forbid"`; future payload types must keep their required
-    fields disjoint from existing payloads, OR this field upgrades to
-    an explicit discriminated union at that time.
+    `EvidenceDerivedCreatedPayload`. Day-1 Step 11 extended it to four
+    members by adding `ComplianceStateAssertedPayload`. Plain Union (not
+    a Pydantic discriminated union) is sufficient because every payload
+    type has a strictly disjoint required-field set from every other and
+    all use `extra="forbid"`; future payload types must keep their
+    required fields disjoint from existing payloads, OR this field
+    upgrades to an explicit discriminated union at that time.
 
     Pydantic config:
         - frozen=True    — events are immutable values; append-only by
@@ -322,6 +446,7 @@ class Event(BaseModel):
         EntityCreatedPayload
         | EvidenceRawIngestedPayload
         | EvidenceDerivedCreatedPayload
+        | ComplianceStateAssertedPayload
     )
     schema_version: str = Field(..., min_length=1)
     occurred_at: datetime
@@ -337,11 +462,12 @@ class Event(BaseModel):
         Structural invariant: an event's aggregate_id must equal the
         identity field of its payload (entity_id for entity.created,
         evidence_id for evidence.raw_ingested, derived_evidence_id for
-        evidence.derived_created). Emitters set this by convention; the
-        validator enforces it at construction time so replay can never
-        resurrect a misaligned envelope from storage without raising.
-        Future event types extend the `event_type` Literal AND this
-        validator together.
+        evidence.derived_created, compliance_state_id for
+        compliance.state_asserted). Emitters set this by convention;
+        the validator enforces it at construction time so replay can
+        never resurrect a misaligned envelope from storage without
+        raising. Future event types extend the `event_type` Literal AND
+        this validator together.
         """
         if self.event_type == "entity.created":
             if not isinstance(self.payload, EntityCreatedPayload):
@@ -381,5 +507,19 @@ class Event(BaseModel):
                     f"({self.aggregate_id}) must equal "
                     f"payload.derived_evidence_id "
                     f"({self.payload.derived_evidence_id})"
+                )
+        elif self.event_type == "compliance.state_asserted":
+            if not isinstance(self.payload, ComplianceStateAssertedPayload):
+                raise ValueError(
+                    "compliance.state_asserted event must carry a "
+                    "ComplianceStateAssertedPayload, "
+                    f"got {type(self.payload).__name__}"
+                )
+            if self.aggregate_id != self.payload.compliance_state_id:
+                raise ValueError(
+                    "compliance.state_asserted: aggregate_id "
+                    f"({self.aggregate_id}) must equal "
+                    f"payload.compliance_state_id "
+                    f"({self.payload.compliance_state_id})"
                 )
         return self
