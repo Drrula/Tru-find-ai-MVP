@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -40,11 +40,16 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # Event-type literal
 # ---------------------------------------------------------------------------
 
-EventType = Literal["entity.created", "evidence.raw_ingested"]
+EventType = Literal[
+    "entity.created",
+    "evidence.raw_ingested",
+    "evidence.derived_created",
+]
 """
 Phase 0 event-type discriminator. Day-1 Step 4 introduced `entity.created`;
-Day-1 Step 8 added `evidence.raw_ingested`. Subsequent days extend this
-toward the full Blueprint §8 minimum set.
+Day-1 Step 8 added `evidence.raw_ingested`; Day-1 Step 10 added
+`evidence.derived_created`. Subsequent days extend this toward the full
+Blueprint §8 minimum set.
 """
 
 
@@ -179,6 +184,102 @@ class EvidenceRawIngestedPayload(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
+class EvidenceDerivedCreatedPayload(BaseModel):
+    """
+    Payload for `evidence.derived_created` events.
+
+    Represents a derived evidence record produced from one or more parent
+    evidence records (raw or derived). Examples: an LLM-extracted summary
+    from a fetched web page, a structured claim derived from a DNC API
+    response, a compliance assertion synthesized from multiple raw
+    observations, an analyst-authored derivation referencing several
+    parents. The derivation logic itself runs OUTSIDE the substrate;
+    this event/projection layer is concerned only with recording the
+    output deterministically so future replay can recover the derived
+    state without re-running the derivation.
+
+    Replay-determinism contract:
+        - `output_payload` is recorded verbatim in events.payload and
+          materialized verbatim into evidence_derived.output_payload.
+        - Replay NEVER re-runs the extraction / LLM / AI logic that
+          produced the output. The producing logic lives outside the
+          substrate.
+        - `derivation_version` records WHICH version of the derivation
+          logic produced the output, so future audit / explainability /
+          scoring-reproducibility code can identify the producing version
+          even if the derivation code itself has since evolved.
+
+    Fields:
+        derived_evidence_id        — stable UUID for the derived record.
+                                     Aggregate convention:
+                                     aggregate_id == derived_evidence_id,
+                                     enforced by the Event validator.
+        subject_entity_id          — optional UUID linking the derived
+                                     evidence to an entity. Nullable;
+                                     soft pointer (no FK at any layer).
+        parent_evidence_ids        — non-empty list[UUID] of soft pointers
+                                     to parent evidence (raw or derived).
+                                     ORDER IS PRESERVED end-to-end.
+                                     Non-empty per Blueprint §10/§11
+                                     provenance-DAG invariant: derived
+                                     evidence must reference one or more
+                                     parents. Enforced at the Pydantic
+                                     layer via min_length=1. NO FK on the
+                                     elements — provenance is by
+                                     convention at this layer.
+        derivation_type            — discriminator string (e.g.
+                                     "summary_extraction",
+                                     "claim_extraction",
+                                     "compliance_assertion"). Free-form
+                                     at this layer; future projections
+                                     may constrain.
+        derivation_version         — opaque version string identifying
+                                     the derivation logic that produced
+                                     this output (e.g. "v1.0.0",
+                                     "summarizer-2026.05@a3f1b2c").
+                                     Required by replay-explainability,
+                                     derivation-evolution tracking,
+                                     auditability, and scoring
+                                     reproducibility. Free-form here.
+        output_payload             — the derived output itself, JSON-
+                                     compatible dict[str, Any]. This is
+                                     PROJECTION SUBSTANCE, not auxiliary
+                                     metadata, so it is materialized in
+                                     evidence_derived.output_payload.
+                                     Replay recovers it verbatim.
+        derived_at_for_projection  — logical derivation time. The
+                                     evidence_derived projector writes
+                                     this directly into the projection;
+                                     the projector never reads the clock.
+
+    Out of scope (NOT here):
+        - The transformation logic itself (LLM client, prompt template,
+          extraction code). All runs OUTSIDE the substrate.
+        - Storage backend for outputs that exceed JSONB-reasonable size.
+        - Cross-projection consistency checks against parent_evidence_ids.
+          The substrate emits/projects faithfully; consistency is a
+          consumer concern.
+        - Auxiliary derivation metadata (e.g. prompt template id, model
+          temperature, retry count) belongs in events.payload alongside
+          the envelope, not in evidence_derived. The projector keeps
+          evidence_derived narrow to the projection-substance fields.
+
+    Pydantic config:
+        - frozen=True       — payload is immutable after construction.
+        - extra="forbid"    — unknown fields raise (Mistake #8 prevention).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    derived_evidence_id: uuid.UUID
+    subject_entity_id: uuid.UUID | None = None
+    parent_evidence_ids: list[uuid.UUID] = Field(..., min_length=1)
+    derivation_type: str = Field(..., min_length=1)
+    derivation_version: str = Field(..., min_length=1)
+    output_payload: dict[str, Any]
+    derived_at_for_projection: datetime
+
+
 # ---------------------------------------------------------------------------
 # Event envelope (Blueprint §7 column set, emitter-supplied subset)
 # ---------------------------------------------------------------------------
@@ -195,14 +296,15 @@ class Event(BaseModel):
     emitter is forced to be explicit about UUID / timestamp generation
     (Governance & Replayability Mistakes #1, #2 prevention).
 
-    Day-1 Step 8 widens the `payload` field from the single
-    `EntityCreatedPayload` to a plain Union over the two payload types
-    currently defined (`EntityCreatedPayload | EvidenceRawIngestedPayload`).
-    Plain Union (not a Pydantic discriminated union) is sufficient because
-    the two payloads have strictly disjoint required-field sets and both
-    use `extra="forbid"`; future payload types must keep their required
-    fields disjoint from existing payloads, OR this field upgrades to an
-    explicit discriminated union at that time.
+    Day-1 Step 8 widened `payload` from the single `EntityCreatedPayload`
+    to a plain Union over `EntityCreatedPayload | EvidenceRawIngestedPayload`.
+    Day-1 Step 10 extended that Union to three members by adding
+    `EvidenceDerivedCreatedPayload`. Plain Union (not a Pydantic
+    discriminated union) is sufficient because every payload type has a
+    strictly disjoint required-field set from every other and all use
+    `extra="forbid"`; future payload types must keep their required
+    fields disjoint from existing payloads, OR this field upgrades to
+    an explicit discriminated union at that time.
 
     Pydantic config:
         - frozen=True    — events are immutable values; append-only by
@@ -216,7 +318,11 @@ class Event(BaseModel):
     event_type: EventType
     aggregate_type: str
     aggregate_id: uuid.UUID
-    payload: EntityCreatedPayload | EvidenceRawIngestedPayload
+    payload: (
+        EntityCreatedPayload
+        | EvidenceRawIngestedPayload
+        | EvidenceDerivedCreatedPayload
+    )
     schema_version: str = Field(..., min_length=1)
     occurred_at: datetime
     recorded_at: datetime
@@ -230,11 +336,12 @@ class Event(BaseModel):
         """
         Structural invariant: an event's aggregate_id must equal the
         identity field of its payload (entity_id for entity.created,
-        evidence_id for evidence.raw_ingested). Emitters set this by
-        convention; the validator enforces it at construction time so
-        replay can never resurrect a misaligned envelope from storage
-        without raising. Future event types extend the `event_type`
-        Literal AND this validator together.
+        evidence_id for evidence.raw_ingested, derived_evidence_id for
+        evidence.derived_created). Emitters set this by convention; the
+        validator enforces it at construction time so replay can never
+        resurrect a misaligned envelope from storage without raising.
+        Future event types extend the `event_type` Literal AND this
+        validator together.
         """
         if self.event_type == "entity.created":
             if not isinstance(self.payload, EntityCreatedPayload):
@@ -260,5 +367,19 @@ class Event(BaseModel):
                     "evidence.raw_ingested: aggregate_id "
                     f"({self.aggregate_id}) must equal payload.evidence_id "
                     f"({self.payload.evidence_id})"
+                )
+        elif self.event_type == "evidence.derived_created":
+            if not isinstance(self.payload, EvidenceDerivedCreatedPayload):
+                raise ValueError(
+                    "evidence.derived_created event must carry an "
+                    "EvidenceDerivedCreatedPayload, "
+                    f"got {type(self.payload).__name__}"
+                )
+            if self.aggregate_id != self.payload.derived_evidence_id:
+                raise ValueError(
+                    "evidence.derived_created: aggregate_id "
+                    f"({self.aggregate_id}) must equal "
+                    f"payload.derived_evidence_id "
+                    f"({self.payload.derived_evidence_id})"
                 )
         return self
