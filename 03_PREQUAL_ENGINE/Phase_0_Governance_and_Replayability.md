@@ -1,7 +1,7 @@
 # Phase 0 — Governance & Replayability Discipline
 
 **Status:** Pre-build governance lock. Read before Week 1 starts.
-**Last revised:** 2026-05-14
+**Last revised:** 2026-05-17
 
 This file defines two things that must be agreed before code is written: (1) who decides what and how drift is prevented, and (2) the engineering invariants that make event-sourced replay actually work. Both are load-bearing. Skipping either creates the failure modes the readiness review flagged.
 
@@ -51,6 +51,18 @@ Three roles. The user is Andrew unless explicitly delegated.
 | Continuity analyst sees scope creep | Escalate to executive operator with explicit "I think this expands scope, ok?" |
 | Substrate test fails repeatedly | Implementation worker → continuity analyst → executive operator if the failure suggests a design flaw vs an implementation bug |
 | Calibration drift suspected (e.g., engine v0.1 produces unexpected results on new operator) | Implementation worker pauses scoring expansion → continuity analyst reviews → executive operator approves either weight recalibration or new engine version release |
+
+### Canonical-source discipline
+
+When two tools or two views of substrate state disagree in a way that would affect a corrective action — file restoration, `git reset`, schema repair, projection rebuild, or any other write that "fixes" the apparent state — confirm canonical state before acting.
+
+*Canonical authorities for Phase 0 substrate state:*
+
+- **Filesystem state.** The host filesystem reachable from the executive operator's terminal. Sandbox, container, and mount views that disagree with the host are non-canonical.
+- **Git state.** `git status`, `git log`, and `git diff` on the host. Sandbox / container git views that disagree are non-canonical.
+- **Projection state.** Deterministic replay from the `events` table at the relevant commit SHA per Part B. Apparent projection divergence is non-canonical until replay confirms.
+
+This doctrine gates corrective action only. Diagnostic activity (read-only inspection, log review, side-by-side comparison) proceeds normally. Escalation reuses the existing role-model paths; no new escalation mechanism is introduced.
 
 ### Drift safeguards
 
