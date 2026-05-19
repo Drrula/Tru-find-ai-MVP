@@ -334,6 +334,79 @@ explicit grant event.** Reading a candidate, observing evidence,
 asserting compliance, defending a candidate — none of these create
 permissions.
 
+### 4.3 Cascade Actor Discipline
+
+INV-7 forbids one event family from being silently emitted as a
+side-effect of the other. This sub-section answers the natural
+follow-up: when a cascade across the boundary *is* policy-appropriate
+(e.g. a candidate moves to DISQUALIFIED and policy says open
+permissions should be revoked), **who** is responsible for emitting
+the downstream events?
+
+The discipline is deliberately narrow:
+
+- **Candidate state transitions emit only candidate-side events.**
+  No candidate emitter, no candidate command-handler may emit a
+  permission event as part of the same operation by reaching into
+  permission-side code. The two emit paths are physically separate.
+
+- **Candidate projectors and permission projectors remain pure
+  read-side functions of the event stream.** A projector consumes
+  one event and writes to its own projection table. It does not
+  import the other side's code. It does not call the other side's
+  emitter. It does not raise events of its own. It does not initiate
+  cascade logic. Per the deterministic-projector rules already in
+  effect for the existing four projections, a projector is
+  pure-function-of-event; this clarification reaffirms that the
+  candidate-permission boundary is one specific case of that
+  general rule.
+
+- **Cascade-driven permission events are emitted by application-side
+  event-emitting code.** Cascade-driven `permission.withdrawn`,
+  retraction permission requests, and any other policy-driven
+  permission state change motivated by candidate-side movement are
+  emitted by a command-handler at the application boundary — NOT by
+  candidate projectors and NOT by any read-side projector. The
+  cascade actor is the same application layer already writing the
+  originating candidate event; that layer is also responsible for
+  any corresponding permission events.
+
+- **Canonical-order emission.** When a cascade is appropriate, the
+  command-handler emits the candidate event and its corresponding
+  permission event(s) in a canonical order — ideally within the
+  same transactional batch as the originating candidate event where
+  the substrate write path permits. This preserves causal ordering
+  in the `sequence_no` log without introducing an orchestrator.
+
+- **No new orchestration layer.** The cascade-actor clarification
+  does NOT authorize a cascade engine, workflow framework, event-bus
+  middleware, orchestrator service, or any other intermediating
+  layer (see §6.1). The application-side command-handler is the
+  same code that was always going to emit candidate events; it
+  carries the cascade responsibility because cascade decisions are
+  application-policy decisions, not substrate-replay decisions.
+
+- **Replay-determinism preserved.** Cascade logic lives at write
+  time only. Replay never re-derives cascade decisions; the
+  cascade-emitted permission events are already present in the
+  event log from original emission and are recovered verbatim.
+  Both candidate and permission projectors remain auditable as pure
+  read-side functions: given the event log, both projections are
+  reconstructible byte-identical.
+
+The drift this clarification closes: an earlier reading permitted
+interpreting INV-7 as compatible with a candidate projector
+"triggering" downstream permission revocation upon writing a
+DISQUALIFIED row. That reading is rejected. Projectors do not
+trigger anything. The application layer that decides to disqualify
+a candidate is the same layer that decides whether to revoke any
+associated permissions; both decisions materialize as separate,
+properly-attributed events emitted in canonical order by application
+code, never by projectors. INV-3 (suppression-as-default) is
+preserved because a cascade revocation, where it occurs, is an
+explicit emit — not a silent re-derivation of permission state from
+candidate state.
+
 ---
 
 ## §5 — The Seven Constitutional INV Rules
@@ -704,11 +777,71 @@ matters. The substrate preserves it.
   future event-emitter were ever to make a paid call in its emit
   path, that emit path itself would violate substrate doctrine.
 
+### 8.3 Replay-Discipline Operational Reference
+
+The replay invariants in §8.1 are stated at the doctrine level.
+Their **operational enforcement** — the concrete rules code must
+follow on every projection commit — is governed by the existing
+substrate replay/governance discipline file:
+
+> `03_PREQUAL_ENGINE/Phase_0_Governance_and_Replayability.md`
+
+That file is the operational source of truth for replay correctness.
+This doctrine document does not duplicate its content; it binds
+future projection work to it by reference.
+
+Binding rules:
+
+- **Every new projector must comply** with the deterministic
+  projector rules in the governance file. The disciplines covered
+  there include, without this doctrine document duplicating their
+  detail:
+  - source-grep guard against `datetime.now`, `uuid.uuid4`,
+    `random`, `os.environ`, `open(`, `requests`, `httpx` in
+    projector source;
+  - emitter-owned UUID and timestamp generation (projectors never
+    generate either);
+  - deterministic JSONB serialization
+    (`json.dumps(..., sort_keys=True)`);
+  - `frozen=True` / `extra="forbid"` Pydantic payload discipline;
+  - `sequence_no`-ASC ordering during replay, never timestamp
+    ordering;
+  - DDL-bypass-path visibility (migrations that disable triggers,
+    direct INSERTs outside the emitter, role-permission gaps must
+    be made visible at commit time);
+  - combined-replay byte-hash test extension as part of any new
+    projection landing in the substrate.
+
+- **Every commit that adds or modifies projection code must review
+  that governance file** as part of the change. The review is not a
+  formality; it is a precondition for merge. A projection commit
+  that did not review the governance file is, by default, a replay-
+  correctness risk.
+
+- **Every new projection must extend the combined-replay byte-hash
+  test in the same implementation commit.** A per-type replay test
+  proves the new projection rebuilds in isolation; the combined-
+  replay test proves it rebuilds correctly alongside every existing
+  projection via a single sequence_no-ordered pass with inline
+  dispatch. Both proofs land together; neither alone is sufficient.
+
+The doctrine document and the governance file are read together;
+neither alone is sufficient for substrate correctness. Future
+projection work (Step 12, Step 13, and beyond) is bound by both.
+
 ---
 
 ## §9 — Status Reminder
 
 This document is canonical doctrine, dated **2026-05-18**.
+
+Amended on **2026-05-18** with two surgical clarifications: §4.3
+(Cascade Actor Discipline — application-side cascade emission, no
+new orchestration layer) and §8.3 (Replay-Discipline Operational
+Reference — binding the doctrine to the existing governance file at
+`03_PREQUAL_ENGINE/Phase_0_Governance_and_Replayability.md`).
+Neither amendment expanded the constitutional core in §5 nor
+introduced any new architecture or implementation.
 
 It supersedes any prior RecommendationCandidate architecture draft
 and its compression pass. It is the binding architectural agreement
